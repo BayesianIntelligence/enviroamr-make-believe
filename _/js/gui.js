@@ -1281,11 +1281,18 @@ BN = class extends BN {
 		return new ArcSelector(parent, child);
 	}
 
+	guiRemoveArcs(itemId) {
+		/// Can't assume itemId is in net
+		let els = qa(`.arc[data-parent="${itemId}"], .arc[data-child="${itemId}"]`);
+		els.forEach(el => el.remove());
+	}
+
 	/// label|statesOnly|distro
 	setNodeView(type) {
 		this.nodeDisplayStyle = type;
 		let nodes = this.selected.size ? [...this.selected].filter(item => item._type == 'Node') 
-		                               : this.outputEl.find('.node').toArray().map(el => this.findItem(el)); 
+		                               : this.outputEl.find('.node').toArray().map(el => this.findItem(el));
+		this.changes.startCombined(); 
 		nodes.forEach(n => {
 			n.updateObject({format:{displayStyle:type}});
 			/*n.dataset.displayStyle = 
@@ -1294,6 +1301,7 @@ BN = class extends BN {
 				n.classList.add('ds_'+type);
 			}*/
 		});
+		this.changes.endCombined();
 	}
 
 	guiOpenSubmodel(submodelPath) {
@@ -1306,9 +1314,10 @@ BN = class extends BN {
 		currentBn.displayBeliefs();
 	}
 
-	guiAddNodeRaw(id, states, opts) {
-		let node = this.addNode(id, states, opts);
+	guiAddNodeRaw(node) {
+		this.net.addNode(node);
 
+		/// updateView
 		if (!node.isHidden()) {
 			node.displayItem(this.outputEl);
 			this.updateArcs(node);
@@ -1318,17 +1327,16 @@ BN = class extends BN {
 	}
 
 	guiAddNode(id, states, opts) {
-		let node = null;
+		let node = this.addNode(id, states, opts);
 
 		this.changes.addAndDo({
-			net: this,
-			args: [id, states, opts ? Node.prototype.toJSON.apply(opts) : {}],
+			net: this, node,
 			name: "Add Node",
 			redo() {
-				node = this.net.guiAddNodeRaw(...this.args);
+				this.net.guiAddNodeRaw(this.node);
 			},
 			undo() {
-				this.net.node[this.args[0]].guiDeleteRaw();
+				this.node.guiDeleteRaw();
 			},
 		});
 		
@@ -2837,6 +2845,11 @@ Submodel = class extends Submodel {
 					net: this.net, submodel: this, //submodelId: this.id,
 					//opts: pick(this, ...'def pos size label comment format submodelPath'.split(/\s+/)),
 					redo() {
+						/// Remove if selected
+						this.submodel.net.selected.delete(this);
+
+						/// Delete base model
+						this.submodel.delete({submodel: true});
 						//let submodel = this.net.find(this.submodelId);
 						/*this.net.changes.chainBefore(_=>{
 							submodel.delete({deleteMethod: 'guiDelete'});
@@ -2844,13 +2857,8 @@ Submodel = class extends Submodel {
 						*/
 						/// Remove the submodel element, and svg paths
 						this.submodel.el().remove();
-						this.submodel.removeArcs();
+						this.net.guiRemoveArcs(this.submodel.id);
 						
-						/// Remove if selected
-						this.submodel.net.selected.delete(this);
-
-						/// Delete base model
-						this.submodel.delete({submodel: true});
 					},
 					undo() {
 						//this.net.guiAddSubmodel(this.submodelId, this.opts);
@@ -2888,8 +2896,42 @@ Submodel = class extends Submodel {
 	}
 }
 
+function addManager() { return null; }
+function addViews() { return null;}
+
 Node = class extends Node {
 	static DisplayItem = addMixin(this, DisplayItem);
+	mgr = addManager(this, class {
+		addParents(parents) {
+			let node = this.model;
+			this.changes().addAndDo({
+				parents: parents.slice(),
+				net: this.net, node,
+				name: "Add Parents",
+				redo() {
+					this.node.addParents(this.parents);
+					this.node.views.addParents(this.parents);
+					this.net.views.structureChanged();
+				},
+				undo() {
+					this.node.removeParents(this.parents);
+					this.node.views.removeParents(this.parents);
+					this.net.views.structureChanged();
+				},
+			});
+		}
+	});
+	views = addViews(this, class {
+		make() {
+			this.root = n('div.node');
+		}
+		addParents(parents) {
+			this.model.net.views.updateArcs(this.model.getVisibleItem());
+		}
+		removeParents(parents) {
+			this.addParents(parents);
+		}
+	});
 	updateObject(o, updateId = null) {
 		/*let old = {};
 		for (let [key,value] of Object.entries(o)) {
@@ -2959,11 +3001,11 @@ Node = class extends Node {
 		if (o.format) {
 			let f = o.format;
 			console.log(f);
-			if (f.backgroundColor)  this._elCached.css('--node-background', f.backgroundColor);
-			if (f.borderColor)  this._elCached.css('--node-border-color', f.borderColor);
-			if (f.fontColor)  this._elCached.css('--node-text', f.fontColor);
-			if (f.fontFamily)  this._elCached.css('--node-font-family', f.fontFamily);
-			if (f.fontSize)  this._elCached.css('--node-font-size', f.fontSize+'pt');
+			if (f.backgroundColor!==undefined)  this._elCached.css('--node-background', f.backgroundColor ?? '');
+			if (f.borderColor!==undefined)  this._elCached.css('--node-border-color', f.borderColor ?? '');
+			if (f.fontColor!==undefined)  this._elCached.css('--node-text', f.fontColor ?? '');
+			if (f.fontFamily!==undefined)  this._elCached.css('--node-font-family', f.fontFamily ?? '');
+			if (f.fontSize!==undefined)  this._elCached.css('--node-font-size', f.fontSize+'pt' ?? '');
 			if (f.displayStyle) {
 				/// Remove the existing displayStyle class if present
 				removeMatchingClasses(this._elCached[0], c => c.startsWith('ds_'));
@@ -4061,21 +4103,19 @@ Node = class extends Node {
 	}
 
 	guiDeleteRaw() {
+		let net = this.net;
+		/// Remove from selections if there
+		net.selected.delete(this);
+
+		/// Delete base object (which actually updates net, submodels, parents, etc.)
+		this.delete();
+
+		/// updateView
 		/// Remove objects for node and arcs (and probably more in future)
 		this.el().remove();
-		this.removeArcs();
-		//this.removePaths();
-		//this.net.outputEl.find('#display_'+node.id).remove();
-		// for (let p of node.pathsIn)  this.net.outputEl.find('#'+p.pathId).data('arcSelector').removePath();
-		// for (let p of node.pathsOut)  this.net.outputEl.find('#'+p.pathId).data('arcSelector').removePath();
-		// this.pathsIn.length = 0;
-		// this.pathsOut.length = 0;
-		
-		/// Remove from selections if there
-		this.net.selected.delete(this);
-
-		/// Delete base object
-		this.delete();
+		/// Arcs are the BN view's responsibility, so need to ask
+		/// that view to remove the arcs (rather than the node)
+		net.guiRemoveArcs(this.id);
 	}
 
 	guiDelete(o = {}) {
@@ -4085,27 +4125,28 @@ Node = class extends Node {
 			...o
 		};
 		
-		/// I think I should remove nodeOrig eventually?
 		let node = this;
 		let net = this.net;
 			
 		let doDelete = _=> {
 			net.changes.addAndDo({
-				extern: {net},
-				node: node.toJSON(),
+				net, node,
 				childDefs: node.children.map(c => c.def.duplicate()),
 				redo() {
 					console.log('START REDO DELETE');
-					this.extern.net.node[this.node.id].guiDeleteRaw();
+					this.node.guiDeleteRaw();
 					console.log('END REDO DELETE');
 				},
 				undo() {
 					console.log('START UNDO DELETE');
-					/// 2024-12-01: This for now is working...
-					/// but don't know if I need guiAddNodeRaw, or something else
-					let newNode = Node.from(this.node, {extern:{net:this.net}});
-					let node = this.extern.net.guiAddNodeRaw(newNode.id, newNode.states, newNode);
-					// let node = this.extern.net.guiAddNodeRaw(this.node.id, this.node.states, this.node);
+					// /// 2024-12-01: This for now is working...
+					// /// but don't know if I need guiAddNodeRaw, or something else
+					// let newNode = Node.from(this.node, {extern:{net:this.net}});
+					// let node = this.extern.net.guiAddNodeRaw(newNode.id, newNode.states, newNode);
+					// // let node = this.extern.net.guiAddNodeRaw(this.node.id, this.node.states, this.node);
+					
+					this.net.guiAddNodeRaw(this.node);
+
 					/// Restore child definitions
 					for (let [i,child] of Object.entries(node.children)) {
 						child.def = this.childDefs[i].duplicate();
@@ -5168,13 +5209,14 @@ class ArcSelector {
 
 	updateIds() {
 		this.path.classList.replace(this.arcId, `arc-${this.parent.id}-${this.child.id}`);
+		q(this.path).dataset.set({parent:this.parent.id,child:this.child.id});
 	}
 
 	isPresent() {
 		let {parent,child} = this;
 		let possibleParents = parent.getAllItems?.() ?? [parent];
 		let possibleChildren = child.getAllItems?.() ?? [child];
-		let anArcPresent = possibleParents.some(p => p.children.some(c => c.id == child.id));
+		let anArcPresent = possibleParents.some(p => p.children.some(c => possibleChildren.map(n=>n.id).includes(c.id)));
 
 		return this.arcId == `arc-${this.parent.id}-${this.child.id}` && anArcPresent;
 	}
@@ -5189,6 +5231,7 @@ class ArcSelector {
 			$(this.path).data('arcSelector', this);
 			$(this.path).data('endpoints', [this.parent,this.child]);
 			$(this.path).addClass(`arc-${this.parent.id}-${this.child.id}`);
+			q(this.path).dataset.set({parent:this.parent.id,child:this.child.id});
 		}
 		else {
 			$(outputEl).find('.netSvgCanvas').append(this.path);
@@ -7432,6 +7475,7 @@ var app = {
 			/// We'll cheat and use node order
 			let rightXs = rightNodes.map(n => n.pos[x]);
 			//rightNodes.forEach(n => n.guiToggleSelect(true));
+			let oldPos = belowNodes.concat(rightNodes).map(n => [n,n.pos.x,n.pos.y]);
 			
 			let mousemove, mouseup;
 			document.body.addEventListener('mousemove', mousemove = event => {
@@ -7454,28 +7498,10 @@ var app = {
 				}
 			});
 			document.body.addEventListener('mouseup', mouseup = event => {
+				let newPos = belowNodes.concat(rightNodes).map(n => [n,n.pos.x,n.pos.y]);
 				currentBn.changes.doCombined(_=> {
-					for (let i=0; i<belowNodes.length; i++) {
-						let node = belowNodes[i];
-						let newY = node.pos[y];
-						if (direction == 'horizontal' || direction == 'rectangular') {
-							/// apiMoveTo is only here to reset to the right state for the undo
-							node.apiMoveTo(node.pos.x,belowYs[i]);
-							node.moveTo(node.pos.x,newY);
-						}
-						else {
-							node.apiMoveTo(belowYs[i],node.pos.y);
-							node.moveTo(newY,node.pos.y);
-						}
-					}
-					if (direction == 'rectangular') {
-						for (let i=0; i<rightNodes.length; i++) {
-							let node = rightNodes[i];
-							let newX = node.pos[x];
-							node.apiMoveTo(rightXs[i],node.pos.y);
-							node.moveTo(newX,node.pos.y);
-						}
-					}
+					for (let [node,x,y] of oldPos)  node.apiMoveTo(x,y);
+					for (let [node,x,y] of newPos)  node.moveTo(x,y);
 				});
 				document.body.removeEventListener('mousemove', mousemove);
 				document.body.removeEventListener('mouseup', mouseup);
@@ -7484,6 +7510,7 @@ var app = {
 		});
 	},
 	autoLayout(callback, o = {}) {
+		o.submodel ??= currentBn.currentSubmodel;
 		let newPoses = Object.values(currentBn.calcAutoLayout(o));
 
 		/// Store the startpoints for all arcs
@@ -7596,23 +7623,34 @@ var app = {
 		//return;
 
 		/// Now, animate the nodes...
-		/// ...and animate the arcs
+		/// ...and animate the arcs...
+		/// undoably
 		/// Everything should move synchronously and smoothly now
-		qa('.netSvgCanvas, .bnview').forEach(el => el.append(n('style.trans', '* { transition: all .4s; }')));
-		setTimeout(_=>{
-				newPoses.forEach(pos => {
-					let nodeId = pos.id;
-					var x = Math.round(pos.x), y = Math.round(pos.y);
-					currentBn.getGraphItemById(nodeId).pos.x = x;
-					currentBn.getGraphItemById(nodeId).pos.y = y;
-					$("#display_"+nodeId).css({top: y, left: x});
-					//$("#display_"+nodeId).animate({top: y, left: x}, 400);
-				});
-				for (let [arcId,arcPath] of Object.entries(endArcPaths)) {
-				currentBn.getArc(arcId).path.setPathData(arcPath);
+		let prevPos = graphItems.map(item => ({id:item.id,...item.pos}));
+		let currentPos = newPoses.map(pos => ({...pos}));
+		let oldEndArcPaths = Object.fromEntries(Object.keys(endArcPaths).map(arcId => [arcId,currentBn.getArc(arcId).path.getPathData()]));
+		currentBn.changes.addAndDo({
+			old: {currentPos:prevPos,endArcPaths:oldEndArcPaths},
+			new: {currentPos,endArcPaths},
+			exec({currentPos,endArcPaths}) {
+				qa('.netSvgCanvas, .bnview').forEach(el => el.append(n('style.trans', '* { transition: all .4s; }')));
+				setTimeout(_=>{
+					currentPos.forEach(pos => {
+						let nodeId = pos.id;
+						let node = currentBn.getGraphItemById(nodeId);
+						var x = Math.round(pos.x), y = Math.round(pos.y);
+						node.pos.x = x;
+						node.pos.y = y;
+						$("#display_"+nodeId).css({top: y, left: x});
+						//$("#display_"+nodeId).animate({top: y, left: x}, 400);
+					});
+					for (let [arcId,arcPath] of Object.entries(endArcPaths)) {
+						currentBn.getArc(arcId).path.setPathData(arcPath);
+					}
+					setTimeout(_=>qa('style.trans').forEach(el => el.remove()), 400);
+				}, 5);
 			}
-			setTimeout(_=>qa('style.trans').forEach(el => el.remove()), 400);
-		}, 5);
+		});
 
 		/** End duplication warning. **/
 	},
@@ -7670,7 +7708,7 @@ var app = {
 		// setTimeout(()=>style.remove(), 650);
 	},
 	/** Change the (NYI: selected) nodes to display as labels or distributions. This requires a relayout of BN. **/
-	changeNodeView: function(type) {
+	changeNodeView(type) {
 		currentBn.setNodeView(type);
 		currentBn.redrawAllArcs();
 		currentBn.resizeCanvasToFit();

@@ -355,6 +355,32 @@ DisplayItem.prototype = {
 		/// a graph item.
 		return Boolean(this.parents || this.subNodes);
 	},
+
+	/**
+	 * Get this item's representative item in the given submodel (e.g. either
+	 * the item itself, or a submodel that contains it, or null if no representative.)
+	 */
+	getItemInSubmodel(submodel) {
+		submodel = this.net.getSubmodel(submodel);
+		if (this.submodelPath.length < submodel.submodelPath.length)  return null;
+
+		/// Make sure item's path is inside submodel's path
+		/// (But don't check root --- everything is inside root)
+		let subPath = [];
+		if (submodel.id) {
+			subPath = submodel.submodelPath.concat(submodel.id);
+			for (let [i,currentPathEl] of subPath.entries()) {
+				let pathEl = this.submodelPath[i];
+				if (pathEl != currentPathEl)  return null;
+			}
+		}
+
+		/// At this point, if paths are equal length, item is in this submodel
+		if (this.submodelPath.length==subPath.length)  return this;
+
+		/// Otherwise, return matching submodel (the one that's visible in the current model)
+		return this.net.getSubmodel(this.submodelPath.slice(0, subPath.length+1));
+	},
 	
 	/// TO REMOVE BOTH FUNCS:
 	/// This only works for graph items
@@ -939,26 +965,12 @@ Object.assign(Node.prototype, {
 			node.def = new CPT(node);
 		}
 
-		if (this.net !== null && !bn.nodes.includes(node)) {
-			/// Notify the network
-			bn.nodes.push(node);
-			bn.nodesById[node.id] = node;
-			if (node.type == "utility") {
-				bn._utilityNodes.push(node);
-			}
-			else if (node.type == "decision") {
-				bn._decisionNodes.push(node);
-			}
-
-			bn.needsCompile = true;
-			/// Update node count, comments, etc. (if present)
-			bn.updateViewer = true;
-
-			/// XXX Remove the following
-			if (o.addToCanvas) {
-				bn.display();
-				bn.updateAndDisplayBeliefs();
-			}
+		/// Notify the network
+		this.net?.addNode?.(this);
+		/// XXX Remove the following
+		if (this.net && o.addToCanvas) {
+			this.net.display();
+			this.net.updateAndDisplayBeliefs();
 		}
 	},
 
@@ -2801,13 +2813,14 @@ var BN = class extends Submodel {
 	get node() { return this.nodesById; }
 	get submodel() { return this.submodelsById; }
 
-	calcAutoLayout(o = {}) {
-		o.direction = o.direction || 'TB';
+	calcAutoLayout({direction, submodel} = {}) {
+		direction ??= 'TB';
+		submodel = this.getSubmodel(submodel ?? []);
 		var g = new dagre.graphlib.Graph();
 		g.setGraph({});
 		g.setDefaultEdgeLabel(function(){ return {}; });
 
-		let graphItems = currentBn.getGraphItems();
+		let graphItems = submodel.getItems().filter(item => item.isGraphItem());
 
 		for (var i=0; i < graphItems.length; i++) {
 			var node = graphItems[i];
@@ -2821,16 +2834,24 @@ var BN = class extends Submodel {
 			g.setNode(node.id, { id: node.id, width: width, height: height} );
 		}
 
+		let getAllChildren = item => {
+			let children = item.getAllNodes ? item.getAllNodes().map(n=>n.children).flat() : node.children;
+			children = children.map(child => child.getItemInSubmodel(submodel)).filter(v=>v!=null);
+			children = [...new Set(children)];
+			return children;
+		};
+
 		for (var i=0; i < graphItems.length; i++) {
 			var node = graphItems[i];
 			if (node.isHidden && node.isHidden())  continue;
-			for (var j=0; j < node.children.length; j++) {
+			let children = getAllChildren(node);
+			for (var j=0; j < children.length; j++) {
 				//if (node.pathsOut[j].isHidden())  continue;
-				g.setEdge(node.id, node.children[j].id);
+				g.setEdge(node.id, children[j].id);
 			}
 		}
 
-		g.graph().rankdir = o.direction;
+		g.graph().rankdir = direction;
 		dagre.layout(g);
 
 		let nodePositions = {};
@@ -2863,6 +2884,9 @@ BN.getIds = function(...items) {
 	return ids;
 };
 BN.makeSubmodelPath = function(path) {
+	/// XXX: I've obviously got something wrong, if I need to use instanceof/type/etc.,
+	/// rather than structural checking
+	if (path._type == 'Submodel')  return path.submodelPath.concat(path.id ? [path.id] : []);
 	if (Array.isArray(path))  return path;
 
 	if (path.search(/^\//)!==-1) {
@@ -4291,17 +4315,47 @@ ${nodesStr}
 	getAllNodes: Submodel.prototype.getAllNodes,
 	/**
 	Add a new node to the network. net.addNode(...) is equivalent to |new Node(net, ...)|.
+
+	net.addNode(node)
+	net.addNode(id, states, opts)
 	*/
-	addNode: function(id, states, opts) {
-		opts = opts || {};
-		console.log(opts);
+	addNode(id, states, opts) {
+		/// If id is a node, wire node up into BN
+		if (id._type == 'Node') {
+			let node = id;
+			if (!node.net) {
+				node.net = this;
+				node.init(node);
+			}
+			/// If not already present, add it
+			if (!this.nodes.includes(node)) {
+				this.nodes.push(node);
+				this.nodesById[node.id] = node;
+				if (node.type == "utility") {
+					this._utilityNodes.push(node);
+				}
+				else if (node.type == "decision") {
+					this._decisionNodes.push(node);
+				}
+	
+				this.needsCompile = true;
+				/// Update node count, comments, etc. (if present)
+				this.updateViewer = true;
+			}
 
-		var newNode = new Node(Object.assign({
-			id: id,
-			states: states,
-		}, opts, {net: this, pathsIn:[], pathsOut:[]}));
+			return node;
+		}
+		else {
+			opts = opts || {};
+			console.log(opts);
 
-		return newNode;
+			var newNode = new Node(Object.assign({
+				id: id,
+				states: states,
+			}, opts, {net: this, pathsIn:[], pathsOut:[]}));
+
+			return newNode;
+		}
 	},
 	/**
 	Add a submodel to the network. net.addSubmodel(...) is equivalent to |new Submodel(net, ...)|.
@@ -4414,9 +4468,6 @@ ${nodesStr}
 		return null;
 	},
 	getSubmodel: function(submodelPath) {
-		/// XXX: I've obviously got something wrong, if I need to use instanceof/type/etc.,
-		/// rather than structural checking
-		if (submodelPath instanceof Submodel)  return submodelPath;
 		submodelPath = BN.makeSubmodelPath(submodelPath);
 
 		var s = this;
