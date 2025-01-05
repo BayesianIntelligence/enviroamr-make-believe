@@ -1,2 +1,6 @@
 node_modules
 npm-debug.log
+.prettierrc.json
+*.lnk
+*.map
+/test/*

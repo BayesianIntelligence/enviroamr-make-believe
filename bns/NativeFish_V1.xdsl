@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!-- This network was created in GeNIe Academic, which can be used for educational and research purposes only -->
+<smile version="1.0" id="V1" numsamples="10000" discsamples="10000">
+	<nodes>
+		<cpt id="Rainfall">
+			<state id="Below_average" />
+			<state id="Average" />
+			<state id="Above_average" />
+			<probabilities>0.1 0.7 0.2</probabilities>
+		</cpt>
+		<cpt id="Drought">
+			<state id="Yes" />
+			<state id="No" />
+			<probabilities>0.25 0.75</probabilities>
+		</cpt>
+		<cpt id="TreeCond">
+			<state id="Good" />
+			<state id="Damaged" />
+			<state id="Dead" />
+			<parents>Drought Rainfall</parents>
+			<probabilities>0.2 0.6 0.2 0.25 0.6 0.15 0.3 0.6 0.1 0.7 0.25 0.05 0.8 0.18 0.02 0.9 0.09 0.01</probabilities>
+		</cpt>
+		<cpt id="PesticideUse">
+			<state id="High" />
+			<state id="Low" />
+			<probabilities>0.9 0.1</probabilities>
+		</cpt>
+		<cpt id="PesticideInRiver">
+			<state id="High" />
+			<state id="Low" />
+			<parents>PesticideUse Rainfall</parents>
+			<probabilities>0.3 0.7 0.6 0.4 0.8 0.2 0.1 0.9 0.2 0.8 0.3 0.7</probabilities>
+		</cpt>
+		<cpt id="RiverFlow">
+			<state id="Good" />
+			<state id="Poor" />
+			<parents>Drought Rainfall</parents>
+			<probabilities>0.05 0.95 0.15 0.85 0.8 0.2 0.4 0.6 0.6 0.4 0.99 0.01</probabilities>
+		</cpt>
+		<cpt id="FishAbundance">
+			<state id="High" />
+			<state id="Medium" />
+			<state id="Low" />
+			<parents>PesticideInRiver RiverFlow</parents>
+			<probabilities>0.2 0.4 0.4 0.01 0.1 0.89 0.8 0.15 0.05 0.05 0.15 0.8</probabilities>
+		</cpt>
+	</nodes>
+	<extensions>
+		<genie version="1.0" app="GeNIe 2.5.5320.0 ACADEMIC" name="Sub0">
+			<node id="Rainfall">
+				<name>Annual Rainfall</name>
+				<interior color="e5f6f7" />
+				<outline color="0000bb" />
+				<font color="000000" name="Arial" size="8" />
+				<position>716 49 792 85</position>
+				<barchart active="true" width="128" height="72" />
+			</node>
+			<node id="Drought">
+				<name>Drought Conditions</name>
+				<interior color="e5f6f7" />
+				<outline color="0000bb" />
+				<font color="000000" name="Arial" size="8" />
+				<position>374 41 450 77</position>
+				<comment>prolonged period of well-below average rainfall</comment>
+				<barchart active="true" width="128" height="64" />
+			</node>
+			<node id="TreeCond">
+				<name>Tree Condition</name>
+				<interior color="e5f6f7" />
+				<outline color="0000bb" />
+				<font color="000000" name="Arial" size="8" />
+				<position>718 240 794 276</position>
+				<barchart active="true" width="128" height="72" />
+			</node>
+			<node id="PesticideUse">
+				<name>Pesticide Use</name>
+				<interior color="e5f6f7" />
+				<outline color="0000bb" />
+				<font color="000000" name="Arial" size="8" />
+				<position>93 39 169 75</position>
+				<barchart active="true" width="128" height="64" />
+			</node>
+			<node id="PesticideInRiver">
+				<name>Pesticide in river</name>
+				<interior color="e5f6f7" />
+				<outline color="0000bb" />
+				<font color="000000" name="Arial" size="8" />
+				<position>94 222 170 258</position>
+				<barchart active="true" />
+			</node>
+			<node id="RiverFlow">
+				<name>River Flow</name>
+				<interior color="e5f6f7" />
+				<outline color="0000bb" />
+				<font color="000000" name="Arial" size="8" />
+				<position>373 231 449 267</position>
+				<barchart active="true" width="128" height="64" />
+			</node>
+			<node id="FishAbundance">
+				<name>Native Fish Abundance</name>
+				<interior color="e5f6f7" />
+				<outline color="0000bb" />
+				<font color="000000" name="Arial" size="8" />
+				<position>375 480 451 516</position>
+				<comment>might need to include an &quot;absent&quot; state in here</comment>
+				<barchart active="true" width="128" height="72" />
+			</node>
+		</genie>
+	</extensions>
+</smile>
