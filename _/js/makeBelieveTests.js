@@ -155,30 +155,6 @@ class InputTesting {
 	}
 }
 
-function _makeSimplePromise(func, ...args) {
-	return new Promise((resolve,reject) => {
-		func(...args, (...callbackArgs) => {
-			/// Auto convert multiple 'return' args to an array for returning
-			resolve(callbackArgs.length==1 ? callbackArgs[0] : callbackArgs);
-		});
-	});
-}
-
-var makeSimplePromise = new Proxy(function(){}, {
-	get(target, property, receiver) {
-		return function(...args) {
-			return _makeSimplePromise(window[property], ...args);
-		};
-	},
-	
-	apply(target, thisArg, argList) {
-		var func = argList[0];
-		var args = argList.slice(1);
-		console.log(func, args);
-		return _makeSimplePromise(func, ...args);
-	},
-});
-
 let openWindows = [];
 
 function openInWindow(el, {title=null}={}) {
@@ -261,7 +237,7 @@ var testing = {
 	tests: {
 		_title: 'Basic Tests',
 		'Basic inference - Asia': async function(callback) {
-			await makeSimplePromise.loadFromServer('bns/Asia.xdsl');
+			await app.loadFromServer('bns/Asia.xdsl');
 			var savedIterations = currentBn.iterations;
 			currentBn.iterations = 1000000;
 			
@@ -280,7 +256,7 @@ var testing = {
 			return areEqual1 && areEqual2;
 		},
 		'Decision Nets - Umbrella': async function(callback) {
-			await makeSimplePromise.loadFromServer('bns/Umbrella.xdsl');
+			await app.loadFromServer('bns/Umbrella.xdsl');
 			var savedIterations = currentBn.iterations;
 			currentBn.iterations = 1000000;
 
@@ -298,7 +274,7 @@ var testing = {
 			return areEqual1 && areEqual2;
 		},
 		'Submodels - Bunce\'s Farm': async function(callback) {
-			await makeSimplePromise.loadFromServer('bns/Bunce\'s Farm.xdsl');
+			await app.loadFromServer('bns/Bunce\'s Farm.xdsl');
 			var savedIterations = currentBn.iterations;
 			currentBn.iterations = 1000000;
 
@@ -316,7 +292,7 @@ var testing = {
 			return areEqual1;
 		},
 		'Formatting': async function(callback) {
-			await makeSimplePromise.loadFromServer('bns/Asia.xdsl');
+			await app.loadFromServer('bns/Asia.xdsl');
 			$('#display_xray').trigger('contextmenu');
 			$('button[data-for=format]').trigger('click');
 			$('[data-object=format][name=backgroundColor]').val('#ff0000');
@@ -331,7 +307,7 @@ var testing = {
 			return areEqual;
 		},
 		'CPT change/edit': async function(callback) {
-			await makeSimplePromise.loadFromServer('bns/Asia.xdsl');
+			await app.loadFromServer('bns/Asia.xdsl');
 			// Right click 'either'
 			$('#display_either').trigger('contextmenu');
 			// Click 'Definition' tab
@@ -363,7 +339,7 @@ var testing = {
 			_title: 'Undo/Redo',
 			'Add node/remove node': async function(log) {
 				log('Load Asia.xdsl')
-				await makeSimplePromise.loadFromServer('bns/Asia.xdsl');
+				await app.loadFromServer('bns/Asia.xdsl');
 				
 				log('Add node testNODE')
 				currentBn.guiAddNode('testNODE', ['yes','no'], {pos:{x:400,y:300}, children:['dysp']});
@@ -384,7 +360,7 @@ var testing = {
 			},
 			'Remove node/add node': async function(log) {
 				log('Load Asia.xdsl')
-				await makeSimplePromise.loadFromServer('bns/Asia.xdsl');
+				await app.loadFromServer('bns/Asia.xdsl');
 
 				log('Delete bronc node')
 				currentBn.node.bronc.guiDelete();
@@ -407,7 +383,7 @@ var testing = {
 			_title: 'Interaction',
 			'Move node, new node, delete node': async function(log) {
 				await log('Load bns/Cancer.dne');
-				await makeSimplePromise.loadFromServer('bns/Cancer.dne');
+				await app.loadFromServer('bns/Cancer.dne');
 				alert('Click OK to start');
 				
 				let tester = q(new InputTesting());
@@ -472,11 +448,12 @@ var testing = {
 			await new Promise(r=>setTimeout(r, 100));
 		}
 	},
-	runTests: async function() {
+	async runTests() {
 		var numPassed = 0;
 		
 		for (var test of testing.tests) {
-			var [testName, testResult] = await makeSimplePromise(test);
+			if (typeof(test)!='function')  continue;
+			var [testName, testResult] = await test();
 			if (testResult)  numPassed++;
 			console.log('Test '+testName, 'Result:', testResult);
 		}

@@ -481,9 +481,9 @@ class NodeContextMenu {
 				this.nodeShadow.def = def;
 			}
 			if (defHasChanges && this.nodeShadow.def && this.nodeShadow.def.invalid) {
-				let dialog = popupDialog(this.nodeShadow.def.invalid, {buttons: [
+				let dialog = dialog.popup(this.nodeShadow.def.invalid, {buttons: [
 					n('button', 'OK', {type:'button', on: {click: event => {
-						dismissDialog(dialog);
+						dialog.dismiss(dialog);
 						event.stopPropagation();
 					}}}),
 				]});

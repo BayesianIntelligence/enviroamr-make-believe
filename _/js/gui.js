@@ -1,9 +1,4 @@
-var keyboardShortcuts = {};
-var guiBnCount = 0;
-var openBns = [];
-var openData = [];
 var currentBn = null;
-var CANVASPAD = 10;
 
 var draw = {
 	arrowHeadGap: 8,
@@ -681,194 +676,65 @@ var draw = {
 	}
 };
 
-function getQs() {
-	var params = {};
-	var argSpecs = window.location.search.substring(1).split('&');
-	if (window.location.search) {
-		for (var i in argSpecs) {
-			var argInfo = argSpecs[i].split('=');
-			params[unescape(argInfo[0])] = unescape(argInfo[1]);
-		}
-	}
-	return params;
-}
-
-if (typeof(window)!="undefined")  window.qs = getQs();
-
-/// Loads the file of the given name/path from the server via XHR, and
-/// then calls the callback
-function loadFromServer(fileName, callback) {
-	var format = fileName.replace(/^.*\.([^.]*)$/, '$1');
-	if (!BN.FILE_EXTENSIONS[format]) {
-		format = "xdsl";
-	}
-	/// Handle binary differently to text
-	let fileExtInfo = BN.FILE_EXTENSIONS[format];
-	if (fileExtInfo.text) {
-		$.get(fileName, function(data) {
-			let bn = new BN({source: data, outputEl: $(".bnview"), format: format, fileName: baseName(fileName), onload: callback});
-			app.openBn(bn);
-		}, "text");
-	}
-	else {
-		let xhr = new XMLHttpRequest();
-		xhr.open("GET", fileName, true);
-		xhr.responseType = 'arraybuffer';
-		xhr.onload = function() {
-			let bn = new BN({source: xhr.response, outputEl: $(".bnview"), format: format, fileName: baseName(fileName), onload: callback});
-			app.openBn(bn);
-		};
-		xhr.send();
-	}
-}
-
-/** Dialogs **/
-function popupDialog($a, opts) {
-	var opts = opts || {};
-	opts.buttons = opts.buttons || [];
-	opts.className = opts.className || "";
-
-	/// $a could be a string, element or jquery element
-	$a = $("<div class=dialog>")
-		.addClass(opts.className)
-		.html($('<div class=content>').html($a))
-		.appendTo("body");
-
-	/// Add controls
-	$a.append($('<div class=controls>').append(opts.buttons));
-
-	var $veil = $("<div class=veil>").width($(window).width()).height($(window).height())
-		.css({opacity: 0})
-		.animate({opacity: 0.5}, 300)
-		.appendTo($("body"));
-
-
-	var w = $a.outerWidth(),
-		h = $a.outerHeight();
-	$a.css('display','flex').fadeIn(300);
-
-	$a.css({left: (($(window).width() - w)/2)+"px"});
-	$a.css({top:(($(window).height() - h)/2)+"px"});
-
-	$a.data("veil", $veil);
-
-	return $a;
-}
-
-function notifyError(msg) {
-	popupDialog(msg+"<div class=controls><button type=button onclick=dismissDialogs()>OK</button></div>");
-}
-
-function notifyMessage(msg) {
-	popupDialog(msg+"<div class=controls><button type=button onclick=dismissDialogs()>OK</button></div>");
-}
-
-function dismissDialog($a, callback) {
-	$a.fadeOut(300);
-	$a.data("veil").animate({opacity: 0}, 300, function() { $(this).hide(); if (typeof(callback)=="function")  callback(); });
-	$a.data("veil").remove();
-	$a.remove();
-}
-
-function dismissDialogs(callback) {
-	var first = true;
-	var $dialogs = $();
-	$(".dialog:visible").each(function() {
-		if ($(this).data("ondestroy")) {
-			$(this).data("ondestroy")();
-		}
-		$dialogs.add(dismissDialog($(this), first ? callback : null));
-		first = false;
-	});
-}
-
-function nyi() {
-	popupDialog('Not yet implemented :(', {buttons:[
-		$('<button type=button>OK</button>').click(dismissDialogs),
-	]});
-}
-
-function popupEditDialog($content, opts) {
-	let $dialog = popupDialog($content, {
-		className: 'contextMenu '+opts.className,
-		buttons: [
-			$('<button type=button class=saveButton disabled>').html('Save').on('click', function() {
-				$(".dialog .saveButton")[0].disabled = true;
-				console.log(whatsDirty);
-				var controls = opts.controls;
-				var success = true;
-				for (var control in controls) {
-					if (whatsDirty[control]) {
-						whatsDirty[control] = false;
-						/**
-						Validity needs to be checked for all controls *first* (to avoid partial updates), but that's not
-						the case right now.
-
-						Currently, change events should be checked in order of failure priority.
-						XXX: This needs fixing.
-						*/
-						if ($('.dialog *[data-control='+control+']').is('input, select, textarea')) {
-							//var valid = $('.dialog *[data-control='+control+']').get().map(a=>$(a).is(':valid')).reduce((a,b)=>a && b);
-							var valid = $('.dialog *[data-control='+control+']').get().map(function(a){return $(a).is(':valid')}).reduce(function(a,b){return a && b});
-							if (valid) {
-								var $control = $('.dialog *[data-control='+control+']');
-								var val = $control.val();
-								/// 'false' specifically means change didn't save
-								if (controls[control].change(val, $control)===false) {
-									$(".dialog .saveButton")[0].disabled = false;
-									whatsDirty[control] = true;
-									success = false;
-
-									/// XXX: This needs fixing. Need validate all controls first.
-									return false;
-								}
-							}
-							else {
-								/// XXX: This needs fixing. Need validate all controls first.
-								return false;
-							}
-						}
-						else {
-							/// Non-standard control, just call with no arguments
-
-							/// 'false' specifically means change didn't save
-							if (controls[control].change($('.dialog *[data-control='+control+']'))===false) {
-								$(".dialog .saveButton")[0].disabled = false;
-								whatsDirty[control] = true;
-								success = false;
-
-								/// XXX: This needs fixing. Need validate all controls first.
-								return false;
-							}
-						}
-					}
-				}
-				if (success && opts.onsave) {
-					opts.onsave();
-				}
-			}),
-			$('<button type=button class=closeButton>').html('Close').on('click', function() {
-				if (opts.onclose)  opts.onclose();
-				dismissDialogs();
-			}),
-		],
-	});
-	$dialog.data("whatsDirty", {});
-	var whatsDirty = $dialog.data("whatsDirty");
-	$dialog.on("change keyup", function(event) {
-		if ($(event.target).closest('*[data-control]').length) {
-			var name = $(event.target).closest('*[data-control]').data('control');
-			whatsDirty[name] = true;
-		}
-		$dialog.find(".saveButton")[0].disabled = false;
-	});
-	if (opts.ondestroy) {
-		$dialog.data("ondestroy", opts.ondestroy);
-	}
-}
-/** End Dialogs **/
-
-
+var dialog = {
+	popup($a, opts) {
+		var opts = opts || {};
+		opts.buttons = opts.buttons || [];
+		opts.className = opts.className || "";
+	
+		/// $a could be a string, element or jquery element
+		$a = $("<div class=dialog>")
+			.addClass(opts.className)
+			.html($('<div class=content>').html($a))
+			.appendTo("body");
+	
+		/// Add controls
+		$a.append($('<div class=controls>').append(opts.buttons));
+	
+		var $veil = $("<div class=veil>").width($(window).width()).height($(window).height())
+			.css({opacity: 0})
+			.animate({opacity: 0.5}, 300)
+			.appendTo($("body"));
+	
+	
+		var w = $a.outerWidth(),
+			h = $a.outerHeight();
+		$a.css('display','flex').fadeIn(300);
+	
+		$a.css({left: (($(window).width() - w)/2)+"px"});
+		$a.css({top:(($(window).height() - h)/2)+"px"});
+	
+		$a.data("veil", $veil);
+	
+		return $a;
+	},
+	error(msg) {
+		this.popup(msg+"<div class=controls><button type=button onclick=dialog.dismissAll()>OK</button></div>");
+	},
+	message(msg) {
+		this.popup(msg+"<div class=controls><button type=button onclick=dialog.dismissAll()>OK</button></div>");
+	},
+	dismiss($a) {
+		$a.fadeOut(300);
+		$a.data("veil").animate({opacity: 0}, 300, function() { $(this).hide(); });
+		$a.data("veil").remove();
+		$a.remove();
+	},
+	dismissAll() {
+		var $dialogs = $();
+		$(".dialog:visible").each(function() {
+			if ($(this).data("ondestroy")) {
+				$(this).data("ondestroy")();
+			}
+			$dialogs.add(dialog.dismiss($(this)));
+		});
+	},
+	nyi() {
+		this.popup('Not yet implemented :(', {buttons:[
+			$('<button type=button>OK</button>').click(dialog.dismissAll),
+		]});
+	},
+};
 
 
 /////////////////////////////////////////////////////
@@ -1212,6 +1078,8 @@ DisplayItem = class extends DisplayItem {
 /// You have to rebind the variable name to something new.
 BN = class extends BN {
 	static DisplayItem = addMixin(this, DisplayItem);
+	static CANVASPAD = 10;
+
 	constructor(...args) {
 		super(...args);
 		this.saveListeners = [];
@@ -1935,8 +1803,7 @@ BN = class extends BN {
 
 		/// Resize the SVG
 		//console.log(maxX, maxY);
-		draw.resizeCanvas($('.netSvgCanvas'), maxX + CANVASPAD, maxY + CANVASPAD);
-		// $(".netSvgCanvas").attr("width", maxX + CANVASPAD).attr("height", maxY + CANVASPAD);
+		draw.resizeCanvas($('.netSvgCanvas'), maxX + BN.CANVASPAD, maxY + BN.CANVASPAD);
 
 		/// Not sure this belongs here. I'm thinking |display()| should just be
 		/// responsible for displaying the BN graph, not associated extras
@@ -1961,7 +1828,7 @@ BN = class extends BN {
 	/// of all graphItems together. This allows arcs with split points to be moved without
 	/// deleting split points.
 	redrawArcs(graphItems, width = null, height = null, opts = {}) {
-		opts.padding = opts.padding!==undefined ? opts.padding : CANVASPAD;
+		opts.padding = opts.padding!==undefined ? opts.padding : BN.CANVASPAD;
 		opts.allArcs ??= false;
 		//Option: opts.moved = {deltaX, deltaY}
 		if (!Array.isArray(graphItems))  graphItems = [graphItems];
@@ -2657,150 +2524,6 @@ Submodel = class extends Submodel {
 		menu.popup({left: event.clientX, top: event.clientY});
 	}
 
-	contextMenuOld() {
-		var node = this;
-		let submodel = this;
-		let net = this.net;
-
-		var whatsDirty = {};
-
-		/** Options **/
-		var $options = $('<div class=options>');
-		var menu = Menu({type: "embedded", items: [
-			MenuAction("<label>Submodel ID:</label> <input type=text data-control=nodeId class=nodeId value='"+toHtml(node.id)+"' pattern='[a-zA-Z_][a-zA-Z_0-9]*'>", function() { }),
-			MenuAction("<label>Label:</label> <input type=text data-control=nodeLabel class=nodeLabel value='"+toHtml(node.label)+"'>", function() { }),
-			MenuAction("<label>Submodel:</label> <input type=text data-control=submodelPath class=submodelPath value='"+toHtml(node.getSubmodelPathStr())+"'>", function() { }),
-			MenuAction(`
-				<label>Dimensions:</label>
-				W: <input type=text data-control=width class='width dimension' value='${toHtml(this.size.width)}'>
-				H: <input type=text data-control=height class='height dimension' value='${toHtml(this.size.height)}'>
-			`, function() { }),
-			MenuAction("Delete...", function() {
-				submodel.guiDelete({prompt: true});
-			}),
-		]});
-		$options.append(menu.make());
-		/** End options **/
-
-		/** Format **/
-		var $format = $('<div class=format>');
-		var formatMenu = Menu({type: "embedded", items: [
-			MenuAction("<label>Background Color:</label> <input type=text data-control=backgroundColor class=backgroundColor value='"+toHtml(submodel.format.backgroundColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Border Color:</label> <input type=text data-control=borderColor class=borderColor value='"+toHtml(submodel.format.borderColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Text Color:</label> <input type=text data-control=textColor class=textColor value='"+toHtml(submodel.format.fontColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Font Family:</label> <input type=text data-control=fontFamily class=fontFamily value='"+toHtml(submodel.format.fontFamily)+"' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Font Size:</label> <input type=text data-control=fontSize class=fontSize value='"+toHtml(submodel.format.fontSize)+"' pattern='[0-9]*' placeholder='[default]'>", function() { }),
-		]});
-		$format.append(formatMenu.make());
-		/** End Format **/
-
-		var tabs = new TabSet([
-			{id: 'main', label: 'Options', content: $options, active: true},
-			{id: 'format', label: 'Format', content: $format},
-		]);
-
-		popupEditDialog(tabs.$tabs, {className: 'submodel', controls: {
-			width: {change(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.size.width,
-					exec(current) {
-						current = current && current>=0 ? current : '';
-						let $displayItem = submodel.el();
-						$displayItem.css('width', current);
-						submodel.size.width = parseFloat(current);
-						currentBn.updateArcs(submodel);
-					},
-				});
-			}},
-			height: {change(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.size.height,
-					exec(current) {
-						current = current && current>=0 ? current : '';
-						let $displayItem = submodel.el();
-						$displayItem.css('height', current);
-						submodel.size.height = parseFloat(current);
-						currentBn.updateArcs(submodel);
-					},
-				});
-			}},
-			backgroundColor: {change: function(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.format.backgroundColor,
-					exec(current) {
-						submodel.el().css('background-color', current);
-						submodel.format.backgroundColor = current;
-					},
-				});
-			}},
-			borderColor: {change: function(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.format.borderColor,
-					exec(current) {
-						var $displayItem = submodel.el();
-						$displayItem.css('border-color', current);
-						$displayItem.find('h6').css('border-color', current);
-						submodel.format.borderColor = current;
-					},
-				});
-			}},
-			textColor: {change: function(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.format.fontColor,
-					exec(current) {
-						submodel.el().css('color', current);
-						submodel.format.fontColor = current;
-					},
-				});
-			}},
-			fontFamily: {change: function(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.format.fontFamily,
-					exec(current) {
-						current = current ? current : '';
-						submodel.el().css('font-family', current);
-						submodel.format.fontFamily = current;
-					},
-				});
-			}},
-			fontSize: {change: function(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.format.fontSize,
-					exec(current) {
-						submodel.el().css('font-size', current ? current+'pt' : '');
-						submodel.format.fontSize = current;
-					},
-				});
-			}},
-			submodelPath: {change: function(val) {
-				submodel.guiMoveToSubmodel(val);
-				/*submodel.setSubmodelPath(val);
-				currentBn.display();
-				currentBn.displayBeliefs();*/
-			}},
-			nodeId: {change: function(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.id,
-					exec(current) {
-						var $displayItem = submodel.el();
-						$displayItem.attr("id", 'display_'+current);
-						submodel.rename(current);
-						$displayItem.find('h6').html(submodel.net.headerFormat(submodel.id,submodel.label));
-					},
-				});
-			}},
-			nodeLabel: {change: function(val) {
-				net.changes.addAndDo({
-					new: val, old: submodel.label,
-					exec(current) {
-						submodel.label = current;
-						submodel.el().find('h6').html(submodel.net.headerFormat(submodel.id,submodel.label));
-					},
-				});
-			}},
-		}});
-	}
-
 	guiAddToNet(net) {
 		let submodel = this;
 		net.changes.addAndDo({
@@ -2870,14 +2593,14 @@ Submodel = class extends Submodel {
 		
 		//this.net.guiUpdateAndDisplayForLast();
 		if (o.prompt) {
-			popupDialog($('<div>Are you sure?</div>'), {buttons: [
+			dialog.popup($('<div>Are you sure?</div>'), {buttons: [
 				$('<button type=button>').html('Delete').on('click', () => {
 					let net = this.net;
 					doDelete();
 					net.guiUpdateAndDisplayForLast();
-					dismissDialogs();
+					dialog.dismissAll();
 				}),
-				$('<button type=button>').html('Cancel').on('click', dismissDialogs),
+				$('<button type=button>').html('Cancel').on('click', dialog.dismissAll),
 			]});
 		}
 		else {
@@ -3546,528 +3269,6 @@ Node = class extends Node {
 		return formatMenu.make();
 	}
 
-	/// This is the context menu for any ordinary node visible on the canvas. It has a set
-	/// of tabs that change based on the type of node. (e.g. CPT tab is displayed for
-	/// discrete chance nodes, while function text is displayed for equation/continuous nodes)
-	contextMenu() {
-		var node = this;
-
-		var whatsDirty = {cpt: false, funcText: false, nodeId: false, comment: false};
-
-		/// Create a duplicate of the node, which will be changed while
-		/// the settings dialog is open.
-		var nodeDup = node.duplicate();
-		/// Keep pointer to original, as sometimes need it
-		nodeDup.nodeOrig = node;
-
-		/** Options **/
-		var $options = $('<div class=options>');
-		$options.html(nodeDup.makeContextOptions());
-		/** End options **/
-
-		var defTab = null;
-
-		/** Definition **/
-		var $defTabContent = $('<div class=defTabContent>');
-		function makeDefTab() { $defTabContent.html(nodeDup.makeContextDefinition()); }
-		//makeDefTab();
-
-		/** Format **/
-		var $format = $('<div class=format>');
-		$format.append(nodeDup.makeContextFormat());
-
-		var tabs = new TabSet([
-			{id: 'main',       label: 'Options',    content: $options, active: true},
-			{id: 'definition', label: 'Definition', content: $defTabContent,   onselect: makeDefTab},
-			{id: 'format',     label: 'Format',     content: $format},
-		]);
-		tabs.$tabs.on('keydown', '*[data-control=cpt]', function(event) {
-			var $target = $(event.target).closest('[data-control=cpt]');
-			var $row = $target.closest('tr');
-			console.log('x',event.keyCode,event.which);
-			if (event.key == 'F1') {
-				console.log('norm');
-				var distro = $row.find('[data-control=cpt]').toArray().map(a=>Number($(a).text()));
-				distro = normalize(distro);
-				$row.find('[data-control=cpt]').each(function(i) {
-					$(this).text(toChance(sigFig(distro[i],3)));
-				});
-				$row.find('[data-control=cpt]').trigger('keyup');
-				return false;
-			}
-			else if (event.key == 'F2') {
-				console.log('fill');
-				var partialDistro = $row.find('[data-control=cpt]').not($target).toArray().map(a=>Number($(a).text()));
-				var partialSum = partialDistro.reduce((c,v)=>c+v);
-				console.log(partialDistro, partialSum);
-				$target.text(toChance(sigFig(Math.max(1 - partialSum,0),3)));
-				$row.find('[data-control=cpt]').trigger('keyup');
-				return false;
-			}
-			/// If user types a '.' after some numbers that aren't just '0', switch to the next cell automatically
-			else if (event.key == ".") {
-				if ($target.text().trim().length > 0 && $target.text().trim()!="0") {
-					console.log(event.which,$target.text().trim());
-					var range = window.getSelection().getRangeAt(0);
-					//return false;
-					if (range.collapsed && range.startOffset == $target.text().length) {
-						/// Find next cell
-						var $nextTd = $target.closest('td').next();
-						var $nextEl = null;
-						if ($nextTd.length) {
-							$nextEl = $nextTd.find('[data-control=cpt]');
-						}
-						else {
-							var $nextTd = $target.closest('tr').next().find('td:first');
-							if ($nextTd.length) {
-								$nextEl = $nextTd.find('[data-control=cpt]');
-							}
-						}
-						if ($nextEl) {
-							$nextEl.text('.');
-							$nextEl.focus();
-							return false;
-						}
-					}
-				}
-			}
-		}).on('blur', '*[data-control=cpt]', function(event) {
-			console.log('cpt blur');
-			/// Only listen for change events
-			if ($(this).text()!=$(this).data('originalValue')) {
-				console.log('cpt change');
-				var $target = $(event.target).closest('[data-control=cpt]');
-				var $row = $target.closest('tr');
-				/// If we entered 1 into this cell,
-				/// automatically zero everything else, and advance to next row
-				if ($(this).text()==1) {
-					var $nextTd = $row.next().find('td:first [data-control=cpt]');
-					$row.find('td [data-control=cpt]').each(function() {
-						if ($(this).text()!=1) {
-							$(this).text(0).trigger('change');
-						}
-					});
-					/*console.log($(':focus'), $row);
-					if ($(document.activeElement).closest('tr').is($row)) {
-						$nextTd.focus();
-					}*/
-					//return false;
-				}
-			}
-		}).on('focus', '*[data-control=cpt]', function(event) {
-			$(this).data('originalValue', $(this).text());
-			if ($(event.target).text()==".") {
-				requestAnimationFrame(function(){
-					var range = document.createRange();
-					range.setStart(event.target.firstChild, 1);
-					range.setEnd(event.target.firstChild, 1);
-					var sel = window.getSelection();
-					sel.removeAllRanges();
-					sel.addRange(range);
-					//range.setStart(event.target.firstChild, 0);
-					//range.setEnd(event.target.firstChild, $(event.target).text().length);
-				});
-				return false;
-			}
-			console.log('focus');
-			//event.target.firstChild.focus();
-			requestAnimationFrame(function(){
-				var range = document.createRange();
-				range.selectNodeContents(event.target.firstChild);
-				var sel = window.getSelection();
-				sel.removeAllRanges();
-				sel.addRange(range);
-				//range.setStart(event.target.firstChild, 0);
-				//range.setEnd(event.target.firstChild, $(event.target).text().length);
-			});
-			return false;
-		}).on('change, input', '*[data-control=nodeType]', function(event) {
-			/// Create a duplicate from the *original* node, and then
-			/// copy the relevant pieces into nodeDup
-			//let tempDup = node.duplicate();
-			let prevType = nodeDup.type;
-			if (prevType == 'utility') {
-				nodeDup.setType(node.type);
-				nodeDup.def = node.def.duplicate();
-				nodeDup.setStates(node.states.map(s => s.id));
-				nodeDup.setType($(this).val());
-			}
-			else {
-				nodeDup.setType($(this).val());
-			}
-		}).on('paste', '*[data-control=cpt]', function(event) {
-			console.log('PASTE');
-			event.preventDefault();
-			let data = event.originalEvent.clipboardData.getData('text/plain');
-			let lines = data.split(/\n/);
-			let td = $(this).closest('td')[0];
-			let tr = $(td).closest('tr')[0];
-			let table = $(td).closest('table')[0];
-			for (let [i,line] of lines.entries()) {
-				let vals = line.split(/\s+/);
-				let curTr = table.rows[tr.rowIndex + i];
-				if (curTr)  for (let [j,val] of vals.entries()) {
-					if (val) {
-						let curTd = curTr.cells[td.cellIndex + j];
-						if (curTd) {
-							$(curTd).find('span').text( val ).trigger('change');
-						}
-					}
-				}
-			}
-		}).on('mousedown', '.cpt td, .cpt th', function(event) {
-			let $startCell = $(event.target).closest('td, th');
-			let $table = $startCell.closest('table');
-			$startCell.closest('table').find('.selected').removeClass('selected');
-			$(document).on('mousemove.cellSelect', function(event) {
-				$startCell.closest('table').find('.selected').removeClass('selected');
-				event.preventDefault();
-				let $endCell = $(event.target).closest('td, th');
-				let [startCellI, endCellI] = [$startCell.index(), $endCell.index()].sort();
-				let [startRowI, endRowI] = [$startCell.closest('tr').index(), $endCell.closest('tr').index()].sort();
-				console.log({startCellI, endCellI, startRowI, endRowI});
-				for (let r=startRowI; r<=endRowI; r++) {
-					for (let c=startCellI; c<=endCellI; c++) {
-						$($table[0].rows[r].cells[c]).addClass('selected');
-					}
-				}
-			}).on('mouseup.cellSelect', function() {
-				$(document).off('.cellSelect .cellCopy');
-				$(document).on('copy.cellCopy', function(event) {
-					console.log('xxx');
-					let str = "";
-					let lastRow = -1;
-					let firstCell = true;
-					$('.cpt .selected').each(function() {
-						let thisRow = $(this).closest('tr').index();
-						if (thisRow > lastRow) {
-							str += str ? '\n' : '';
-							lastRow = thisRow;
-							firstCell = true;
-						}
-						str += (!firstCell ? '\t' : '') + $(this).text();
-						firstCell = false;
-					});
-					event.originalEvent.clipboardData.setData('text/plain', str);
-					event.originalEvent.preventDefault();
-				});
-			});
-		})
-
-		node.net.changes.startCombined();
-		let net = node.net;
-		popupEditDialog(tabs.$tabs, {className: 'node',
-			onsave: function() {
-				/// Update the duplicate node
-				node.duplicateInto(nodeDup);
-				//node.net.changes.endCombined();
-			},
-			onclose: function() {
-				//node.net.changes.endCombined();
-			},
-			ondestroy() {
-				console.log('destroyed');
-				net.changes.endCombined();
-				$(document).off('.cellCopy');
-			},
-			controls: {
-				backgroundColor: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						oldVal: node.format.backgroundColor, newVal: val,
-						exec(changeTo) {
-							var node = this.net.nodesById[this.nodeId];
-							var $displayNode = $('#display_'+node.id);
-							$displayNode.css('background-color', changeTo==null? '' : changeTo);
-							node.format.backgroundColor = changeTo;
-						},
-						undo() { this.exec(this.oldVal); },
-						redo() { this.exec(this.newVal); },
-					});
-				}},
-				borderColor: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						oldVal: node.format.borderColor, newVal: val,
-						exec(changeTo) {
-							var node = this.net.nodesById[this.nodeId];
-							var $displayNode = $('#display_'+this.nodeId);
-							$displayNode.css('border-color', changeTo==null ? '' : changeTo);
-							$displayNode.find('h6').css('border-color', changeTo==null ? '' : changeTo);
-							node.format.borderColor = changeTo;
-						},
-						undo() { this.exec(this.oldVal); },
-						redo() { this.exec(this.newVal); },
-					});
-				}},
-				textColor: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						oldVal: node.format.fontColor, newVal: val,
-						exec(changeTo) {
-							var node = this.net.nodesById[this.nodeId];
-							var $displayNode = $('#display_'+this.nodeId);
-							$displayNode.css('color', changeTo==null ? '' : changeTo);
-							node.format.fontColor = changeTo;
-						},
-						undo() { this.exec(this.oldVal); },
-						redo() { this.exec(this.newVal); },
-					});
-				}},
-				fontFamily: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						oldVal: node.format.fontFamily, newVal: val,
-						exec(changeTo) {
-							var node = this.net.nodesById[this.nodeId];
-							var $displayNode = $('#display_'+this.nodeId);
-							$displayNode.css('font-family', changeTo==null ? '' : changeTo);
-							node.format.fontFamily = changeTo;
-						},
-						undo() { this.exec(this.oldVal); },
-						redo() { this.exec(this.newVal); },
-					});
-				}},
-				fontSize: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						oldVal: node.format.fontSize, newVal: val,
-						exec(changeTo) {
-							//onsole.log("changeTo", changeTo);
-							var node = this.net.nodesById[this.nodeId];
-							var $displayNode = $('#display_'+node.id);
-							$displayNode.css('font-size', changeTo===null ? '' : changeTo+'pt');
-							node.format.fontSize = changeTo;
-						},
-						undo() { this.exec(this.oldVal); },
-						redo() { this.exec(this.newVal); },
-					});
-				}},
-				submodelPath: {change: function(val) {
-					node.guiMoveToSubmodel(val);
-					/*node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						oldVal: node.getSubmodelPathStr(), newVal: val,
-						exec(changeTo) {
-							var node = this.net.nodesById[this.nodeId];
-							node.setSubmodelPath(changeTo);
-							currentBn.display();
-							currentBn.displayBeliefs();
-						},
-						undo() { this.exec(this.oldVal); },
-						redo() { this.exec(this.newVal); },
-					});*/
-				}},
-				nodeId: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net,
-						oldId: node.id,
-						newId: val,
-						rename(toId, prevId) {
-							let node = this.net.find(prevId);
-							console.log('renaming', $('#display_'+node.id), toId);
-							var $displayNode = $('#display_'+node.id);
-							$displayNode.attr("id", 'display_'+toId);
-							node.rename(toId);
-							$displayNode.find('h6').html(currentBn.headerFormat(node.id,node.label));
-						},
-						undo() {
-							this.rename(this.oldId, this.newId);
-						},
-						redo() {
-							this.rename(this.newId, this.oldId);
-						}
-					});
-				}},
-				nodeLabel: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, node: node,
-						old: node.label,
-						new: val,
-						exec(current) {
-							//let node = this.net.find(this.nodeId);
-							//var $displayNode = $('#display_'+node.id);
-							let $displayNode = this.node.el();
-							this.node.label = current;
-							$displayNode.find('h6').html(currentBn.headerFormat(this.node.id,this.node.label));
-						},
-						/*undo() {
-							this.relabel(this.oldLabel);
-						},
-						redo() {
-							this.relabel(this.newLabel);
-						}*/
-					});
-				}},
-				nodeType: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						old: {type: node.type, def: node.def.duplicate(), states: node.states.map(s => s.id),
-								children: node.children.map(c => [c.id,c.def.duplicate()])},
-						new: {type: val, def: null},
-						exec(current, previous) {
-							let node = this.net.find(this.nodeId);
-							node.setType(current.type);
-							if (current.def)  node.def = current.def;
-							else  current.def = node.def;
-							if (previous.type=='utility') {
-								node.setStates(current.states);
-								current.children.forEach(([cid,cdef]) => {
-									let child = node.net.find(cid);
-									node.addChildren([child]);
-									child.def = cdef.duplicate();
-								});
-							}
-							currentBn.display();
-							currentBn.updateAndDisplayBeliefs();
-						},
-					});
-				}},
-				definitionType: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						old: {type: node.def.type, def: node.def.duplicate()},
-						new: {type: val, def: null},
-						exec(current, previous) {
-							let node = this.net.find(this.nodeId);
-							node.setDefinitionType(current.type);
-							if (current.def)  node.def = current.def;
-							else  current.def = node.def;
-							currentBn.display();
-							currentBn.updateAndDisplayBeliefs();
-						},
-					});
-				}},
-				funcText: {change: function(val) {
-					node.net.changes.addAndDo({
-						net: node.net, nodeId: node.id,
-						oldVal: node.funcText, newVal: val,
-						exec(changeTo) {
-							var node = this.net.nodesById[this.nodeId];
-							node.def.set(changeTo);
-							currentBn.updateAndDisplayBeliefs();
-						},
-						undo() { this.exec(this.oldVal); },
-						redo() { this.exec(this.newVal); },
-					});
-				}},
-				comment: {change: function(val) {
-					/// XXX: It's not clear to me that this is the best
-					/// way to do undo for text fields. However, the alternative
-					/// is much more work to do. (For now.)
-					node.net.changes.addAndDo({
-						net: node.net, node: node,
-						old: node.comment,
-						new: $(".dialog textarea.comment").val(),
-						exec(current) {
-							this.node.comment = current==null ? '' : current;
-						},
-					});
-				}},
-				cpt: {change: function(val) {
-					var oldNode = node.duplicate();
-					var newCpt = $(".dialog .prob").map(function() { return $(this).text(); }).toArray();
-					/// XXX Lots to clean up and fix
-					var invalid = false;
-					var numRows = nodeDup.def.cpt.length/nodeDup.states.length;
-					for (var r=0; r<numRows; r++) {
-						var sum = 0;
-						for (var c=0; c<nodeDup.states.length; c++) {
-							console.log(r, c, nodeDup.states.length, r*nodeDup.states.length + c);
-							sum += parseFloat(newCpt[r*nodeDup.states.length + c]);
-						}
-						console.log(r, sum, newCpt, nodeDup.states, nodeDup.def.cpt, node.def.cpt);
-						if (Math.round(sum*1000) != 1000) {
-							invalid = true;
-							$(".dialog .cpt tr:nth("+(r+1)+")").addClass("invalid");
-						}
-					}
-
-					if (invalid) {
-						alert('One or more rows do not sum to 1.');
-						return false;
-					}
-					else {
-						node.net.changes.addAndDo({
-							net: node.net, nodeId: node.id,
-							oldStates: node.states.map(a=>a.id),
-							oldCpt: node.def.cpt.map(a=>a),
-							newStates: nodeDup.states.map(a=>a.id),
-							newCpt: newCpt,
-							exec(toStates, toCpt) {
-								var statesChanged = false;
-								var oldChildren = [];
-								var node = this.net.nodesById[this.nodeId];
-								if (node.states.length != toStates.length) {
-									for (var child of node.children) {
-										oldChildren.push( child.duplicateLocal() );
-									}
-									node.setStates(toStates);
-									node.def.cpt = toCpt;
-
-									statesChanged = true;
-								}
-								else {
-									node.def.set1d(toCpt);
-								}
-								/// Do more efficient display update?
-								/// XXX: Does this work properly with undo now?
-								if (statesChanged) {
-									for (var [i,child] of Object.entries(node.children)) {
-										child.def.updateChild({oldChild: oldChildren[i]});
-									}
-									currentBn.display();
-								}
-								currentBn.updateAndDisplayBeliefs();
-							},
-							undo() { this.exec(this.oldStates, this.oldCpt); },
-							redo() { this.exec(this.newStates, this.newCpt); },
-						});
-					}
-				}},
-				funcTable: {change: function() {
-					let newTable = $(".dialog .state")
-						.map(function() { return $(this).is('select') ? $(this).val() : $(this).text(); })
-						.get();
-					node.net.changes.addAndDo({
-						name: 'Change CDT',
-						net: node.net, nodeId: node.id,
-						old: node.def.funcTable.slice(),
-						new: newTable,
-						exec(current) {
-							let node = this.net.find(this.nodeId);
-							console.log(this.nodeId, current, node.type);
-							if (node.type == "utility") {
-								node.setValues(current.map(v => parseFloat(v)));
-							}
-							else {
-								node.def.set(current.map(v => parseInt(v)));
-							}
-							currentBn.display();
-							currentBn.updateAndDisplayBeliefs();
-						},
-					});
-				}},
-				state: {change: function() {
-					node.net.changes.addAndDo({
-						name: 'Rename states',
-						old: node.states.map(s => s.id),
-						new: $(".dialog .stateLabel").map(function() { return $(this).text(); }).toArray(),
-						exec(states) {
-							/// XXX Validate the rename
-							var o = {};
-							for (var i=0; i<states.length; i++)  o[i] = states[i].trim();
-							console.log(o);
-							node.renameStates(o);
-							currentBn.display();
-							currentBn.displayBeliefs();
-						}
-					});
-				}},
-			}
-		});
-	}
-
 	contextMenu(event) {
 		/// The new node dialog box/context menu
 		/// To do:
@@ -4095,7 +3296,7 @@ Node = class extends Node {
 			undo() {
 				this.node.delete();
 				this.node.el().remove();
-				this.node.removeArcs();
+				this.net.guiRemoveArcs(this.node.id);
 				//this.node.cleanPathsInOut();
 			},
 		});
@@ -4160,13 +3361,13 @@ Node = class extends Node {
 		}
 		
 		if (o.prompt) {
-			popupDialog($('<div>Are you sure?</div>'), {buttons: [
+			dialog.popup($('<div>Are you sure?</div>'), {buttons: [
 				$('<button type=button>').html('Delete').on('click', () => {
 					doDelete();
 					net.guiUpdateAndDisplayForLast();
-					dismissDialogs();
+					dialog.dismissAll();
 				}),
-				$('<button type=button>').html('Cancel').on('click', dismissDialogs),
+				$('<button type=button>').html('Cancel').on('click', dialog.dismissAll),
 			]});
 		}
 		else {
@@ -4683,13 +3884,13 @@ TextBox = class extends TextBox {
 		};
 
 		if (o.prompt) {
-			popupDialog($('<div>Are you sure?</div>'), {buttons: [
+			dialog.popup($('<div>Are you sure?</div>'), {buttons: [
 				$('<button type=button>').html('Delete').on('click', () => {
 					let net = this.net;
 					doDelete();
-					dismissDialogs();
+					dialog.dismissAll();
 				}),
-				$('<button type=button>').html('Cancel').on('click', dismissDialogs),
+				$('<button type=button>').html('Cancel').on('click', dialog.dismissAll),
 			]});
 		}
 		else {
@@ -4735,154 +3936,6 @@ TextBox = class extends TextBox {
 	contextMenu(event) {
 		let menu = new TextContextMenu(this);
 		menu.popup({left: event.clientX, top: event.clientY});
-	}
-
-	contextMenuOld() {
-		let textBox = this;
-		let net = this.net;
-
-		var whatsDirty = {};
-
-		/** Options **/
-		var $options = $('<div class=options>');
-		var menu = Menu({type: "embedded", items: [
-			MenuAction("<label>TextBox ID:</label> <input type=text data-control=textBoxId class=textBoxId value='"+toHtml(this.id)+"' pattern='[a-zA-Z_][a-zA-Z_0-9]*'>", function() { }),
-			MenuAction("<label>Submodel:</label> <input type=text data-control=submodelPath class=submodelPath value='"+toHtml(this.getSubmodelPathStr())+"'>", function() { }),
-			MenuAction(`
-				<label>Dimensions:</label>
-				W: <input type=text data-control=width class='width dimension' value='${toHtml(this.size.width)}'>
-				H: <input type=text data-control=height class='height dimension' value='${toHtml(this.size.height)}'>
-				`, function() { }),
-			MenuAction("Delete...", function() {
-				textBox.guiDelete({prompt: true});
-			}),
-		]});
-		$options.append(menu.make());
-		/** End options **/
-
-		/** Format **/
-		var $format = $('<div class=format>');
-		var formatMenu = Menu({type: "embedded", items: [
-			//MenuAction("<label>Background Color:</label> <input type=text data-control=backgroundColor class=backgroundColor value='"+toHtml(textBox.format.backgroundColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			//MenuAction("<label>Border Color:</label> <input type=text data-control=borderColor class=borderColor value='"+toHtml(textBox.format.borderColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Text Color:</label> <input type=text data-control=textColor class=textColor value='"+toHtml(textBox.format.fontColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Font Family:</label> <input type=text data-control=fontFamily class=fontFamily value='"+toHtml(textBox.format.fontFamily)+"' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Font Size:</label> <input type=text data-control=fontSize class=fontSize value='"+toHtml(textBox.format.fontSize)+"' pattern='[0-9]*' placeholder='[default]'>", function() { }),
-		]});
-		$format.append(formatMenu.make());
-		/** End Format **/
-
-		var tabs = new TabSet([
-			{id: 'main', label: 'Options', content: $options, active: true},
-			{id: 'format', label: 'Format', content: $format},
-		]);
-
-		net.changes.startCombined();
-		popupEditDialog(tabs.$tabs, {className: 'node', 
-			ondestroy() {
-				console.log("DESTROYED");
-				net.changes.endCombined();
-			},
-			controls: {
-				width: {change(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.size.width,
-						exec(current) {
-							current = current && current>=0 ? current : '';
-							let $displayNode = textBox.el();
-							$displayNode.css('width', current);
-							textBox.size.width = parseFloat(current);
-						},
-					});
-				}},
-				height: {change(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.size.height,
-						exec(current) {
-							current = current && current>=0 ? current : '';
-							let $displayNode = textBox.el();
-							$displayNode.css('height', current);
-							textBox.size.height = parseFloat(current);
-						},
-					});
-				}},
-				backgroundColor: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.format.backgroundColor,
-						exec(current) {
-							if (!current)  current = '';
-							var $displayNode = textBox.el();
-							$displayNode.css('background-color', current);
-							textBox.format.backgroundColor = current;
-						},
-					});
-				}},
-				borderColor: {change: function(val) {
-					/*var $displayNode = $('#display_'+node.id);
-					$displayNode.css('border-color', val);
-					$displayNode.find('h6').css('border-color', val);
-					node.format.borderColor = val;*/
-				}},
-				textColor: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.format.fontColor,
-						exec(current) {
-							if (!current)  current = '';
-							var $displayNode = textBox.el();
-							$displayNode.css('color', current);
-							textBox.format.fontColor = current;
-						},
-					});
-				}},
-				fontFamily: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.format.fontFamily,
-						exec(current) {
-							if (!current)  current = '';
-							var $displayNode = textBox.el();
-							$displayNode.css('font-family', current);
-							textBox.format.fontFamily = current;
-						},
-					});
-				}},
-				fontSize: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.format.fontSize,
-						exec(current) {
-							if (!current)  current = '';
-							var $displayNode = textBox.el();
-							$displayNode.css('font-size', current ? current+'pt' : '');
-							textBox.format.fontSize = parseFloat(current);
-						},
-					});
-				}},
-				submodelPath: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.getSubmodelPathStr(),
-						exec(current) {
-							textBox.setSubmodelPath(current);
-							textBox.net.display();
-							textBox.net.displayBeliefs();
-						},
-					});
-				}},
-				textBoxId: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.id,
-						exec(current) {
-							let $displayNode = textBox.el();
-							$displayNode.attr("id", 'display_'+current);
-							textBox.rename(current);
-							$displayNode.find('h6').html(currentBn.headerFormat(textBox.id,textBox.label));
-							/*var $displayNode = $('#display_'+textBox.id);
-							$displayNode.attr("id", 'display_'+val);
-							textBox.rename(val);
-							$displayNode.find('h6').html(currentBn.headerFormat(textBox.id,textBox.label));*/
-						},
-					});
-				}},
-			}
-		});
 	}
 
 	static handleEvents(bnComponent) {
@@ -4985,13 +4038,13 @@ ImageBox = class extends ImageBox {
 		};
 
 		if (o.prompt) {
-			popupDialog($('<div>Are you sure?</div>'), {buttons: [
+			dialog.popup($('<div>Are you sure?</div>'), {buttons: [
 				$('<button type=button>').html('Delete').on('click', () => {
 					let net = this.net;
 					doDelete();
-					dismissDialogs();
+					dialog.dismissAll();
 				}),
-				$('<button type=button>').html('Cancel').on('click', dismissDialogs),
+				$('<button type=button>').html('Cancel').on('click', dialog.dismissAll),
 			]});
 		}
 		else {
@@ -5032,151 +4085,6 @@ ImageBox = class extends ImageBox {
 	/// NYI
 	contextMenu() {
 		return null;
-		let textBox = this;
-		let net = this.net;
-
-		var whatsDirty = {};
-
-		/** Options **/
-		var $options = $('<div class=options>');
-		var menu = Menu({type: "embedded", items: [
-			MenuAction("<label>TextBox ID:</label> <input type=text data-control=textBoxId class=textBoxId value='"+toHtml(this.id)+"' pattern='[a-zA-Z_][a-zA-Z_0-9]*'>", function() { }),
-			MenuAction("<label>Submodel:</label> <input type=text data-control=submodelPath class=submodelPath value='"+toHtml(this.getSubmodelPathStr())+"'>", function() { }),
-			MenuAction(`
-				<label>Dimensions:</label>
-				W: <input type=text data-control=width class='width dimension' value='${toHtml(this.size.width)}'>
-				H: <input type=text data-control=height class='height dimension' value='${toHtml(this.size.height)}'>
-				`, function() { }),
-			MenuAction("Delete...", function() {
-				textBox.guiDelete({prompt: true});
-			}),
-		]});
-		$options.append(menu.make());
-		/** End options **/
-
-		/** Format **/
-		var $format = $('<div class=format>');
-		var formatMenu = Menu({type: "embedded", items: [
-			//MenuAction("<label>Background Color:</label> <input type=text data-control=backgroundColor class=backgroundColor value='"+toHtml(textBox.format.backgroundColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			//MenuAction("<label>Border Color:</label> <input type=text data-control=borderColor class=borderColor value='"+toHtml(textBox.format.borderColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Text Color:</label> <input type=text data-control=textColor class=textColor value='"+toHtml(textBox.format.fontColor)+"' pattern='#[a-fA-F_0-9]*' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Font Family:</label> <input type=text data-control=fontFamily class=fontFamily value='"+toHtml(textBox.format.fontFamily)+"' placeholder='[default]'>", function() { }),
-			MenuAction("<label>Font Size:</label> <input type=text data-control=fontSize class=fontSize value='"+toHtml(textBox.format.fontSize)+"' pattern='[0-9]*' placeholder='[default]'>", function() { }),
-		]});
-		$format.append(formatMenu.make());
-		/** End Format **/
-
-		var tabs = new TabSet([
-			{id: 'main', label: 'Options', content: $options, active: true},
-			{id: 'format', label: 'Format', content: $format},
-		]);
-
-		net.changes.startCombined();
-		popupEditDialog(tabs.$tabs, {className: 'node', 
-			ondestroy() {
-				console.log("DESTROYED");
-				net.changes.endCombined();
-			},
-			controls: {
-				width: {change(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.size.width,
-						exec(current) {
-							current = current && current>=0 ? current : '';
-							let $displayNode = textBox.el();
-							$displayNode.css('width', current);
-							textBox.size.width = parseFloat(current);
-						},
-					});
-				}},
-				height: {change(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.size.height,
-						exec(current) {
-							current = current && current>=0 ? current : '';
-							let $displayNode = textBox.el();
-							$displayNode.css('height', current);
-							textBox.size.height = parseFloat(current);
-						},
-					});
-				}},
-				backgroundColor: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.format.backgroundColor,
-						exec(current) {
-							if (!current)  current = '';
-							var $displayNode = textBox.el();
-							$displayNode.css('background-color', current);
-							textBox.format.backgroundColor = current;
-						},
-					});
-				}},
-				borderColor: {change: function(val) {
-					/*var $displayNode = $('#display_'+node.id);
-					$displayNode.css('border-color', val);
-					$displayNode.find('h6').css('border-color', val);
-					node.format.borderColor = val;*/
-				}},
-				textColor: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.format.fontColor,
-						exec(current) {
-							if (!current)  current = '';
-							var $displayNode = textBox.el();
-							$displayNode.css('color', current);
-							textBox.format.fontColor = current;
-						},
-					});
-				}},
-				fontFamily: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.format.fontFamily,
-						exec(current) {
-							if (!current)  current = '';
-							var $displayNode = textBox.el();
-							$displayNode.css('font-family', current);
-							textBox.format.fontFamily = current;
-						},
-					});
-				}},
-				fontSize: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.format.fontSize,
-						exec(current) {
-							if (!current)  current = '';
-							var $displayNode = textBox.el();
-							$displayNode.css('font-size', current ? current+'pt' : '');
-							textBox.format.fontSize = parseFloat(current);
-						},
-					});
-				}},
-				submodelPath: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.getSubmodelPathStr(),
-						exec(current) {
-							textBox.setSubmodelPath(current);
-							textBox.net.display();
-							textBox.net.displayBeliefs();
-						},
-					});
-				}},
-				textBoxId: {change: function(val) {
-					net.changes.addAndDo({
-						new: val, old: textBox.id,
-						exec(current) {
-							let $displayNode = textBox.el();
-							$displayNode.attr("id", 'display_'+current);
-							textBox.rename(current);
-							$displayNode.find('h6').html(currentBn.headerFormat(textBox.id,textBox.label));
-							/*var $displayNode = $('#display_'+textBox.id);
-							$displayNode.attr("id", 'display_'+val);
-							textBox.rename(val);
-							$displayNode.find('h6').html(currentBn.headerFormat(textBox.id,textBox.label));*/
-						},
-					});
-				}},
-			}
-		});
 	}
 }
 
@@ -5465,7 +4373,7 @@ class ArcSelector {
 			}));
 			let msg = [`Which arcs do you wish to delete?`, arcs];
 			let net = parent.net;
-			let $dialog = popupDialog(msg, {buttons: [
+			let $dialog = dialog.popup(msg, {buttons: [
 				n('button', 'Delete', {type: 'button', on: {click() {
 					let selected = $dialog.find('.sel:checked').get().map(n => JSON.parse($(n).val()));
 					let [visParent,visChild] = selected[0].map(id => net.find(id).getVisibleItem());
@@ -5484,10 +4392,10 @@ class ArcSelector {
 							arc.path = null;
 						}
 					});
-					dismissDialogs();
+					dialog.dismissAll();
 				}}}),
 				n('button', 'Cancel', {type: 'button', on: {click() {
-					dismissDialogs();
+					dialog.dismissAll();
 				}}})
 			]});
 		}
@@ -6868,8 +5776,16 @@ WeightedSum.Editor = class extends Definition.Editor {
 
 
 var app = {
-	/// The currently focused "window"
+	// The currently focused "window"
 	windowFocus: null,
+	// Keyboard shortcuts are setup during initialisation (primarily via menus)
+	keyboardShortcuts: {},
+	// How many BNs without names?
+	bnCount: 0,
+	// Opened BNs
+	openBns: [],
+	// Opened data sets
+	openData: [],
 	/// The clipboard is inherently a global thing, but maybe some of the copy/paste
 	/// actions can be moved into the BN
 	clipboard: {
@@ -6995,11 +5911,12 @@ var app = {
 			}
 			/// If there's a file to go to, open it.
 			else if (window.qs.file) {
-				loadFromServer(window.qs.file, _=>app.updateBN());
+				await app.loadFromServer(window.qs.file);
+				app.updateBN();
 			}
 			/// Otherwise, go to a new BN.
 			else {
-				let bn = new BN({filename: `bn${++guiBnCount}.xdsl`});
+				let bn = new BN({filename: `bn${++this.bnCount}.xdsl`});
 				app.openBn(bn);
 				currentBn.display();
 				app.updateBN();
@@ -7011,14 +5928,29 @@ var app = {
 			window.history.pushState({}, '', changeQsUrl(window.location.href, {file: null}));
 			sessionStorage.removeItem('openBn');
 			idbKeyVal.del(window.qs.bnId, 'bns');
-			let bn = new BN({filename: `bn${++guiBnCount}.xdsl`});
+			let bn = new BN({filename: `bn${++this.bnCount}.xdsl`});
 			app.openBn(bn);
 			currentBn.display();
 		}
 	},
+	/// Loads the file of the given name/path from the server via XHR, and
+	/// then calls the callback
+	loadFromServer(fileName) {
+		return new Promise(async callback=>{
+			var format = fileName.replace(/^.*\.([^.]*)$/, '$1');
+			if (!BN.FILE_EXTENSIONS[format]) {
+				format = "xdsl";
+			}
+			/// Handle binary differently to text
+			let fileExtInfo = BN.FILE_EXTENSIONS[format];
+			let source = await fetch(fileName).then(r => fileExtInfo.text ? r.text() : r.arrayBuffer());
+			let bn = new BN({source, outputEl: $(".bnview"), format: format, fileName: baseName(fileName), onload: callback});
+			app.openBn(bn);
+		});
+	},
 	openBn(bn, o = {}) {
 		o.restored ??= false;
-		openBns.push(bn);
+		this.openBns.push(bn);
 		/** XXX Add window mgmt */
 		document.querySelectorAll('.bnouterview > :not(.bnmidview)').forEach(el => el.remove());
 		currentBn = bn;
@@ -7146,9 +6078,9 @@ var app = {
 			sep = /\s*,\s*/;
 		}
 		
-		openData.push(readCsv(text, {sep}));
+		this.openData.push(readCsv(text, {sep}));
 		
-		app.updateDataMenus({add: {fileName: o.fileName, index: openData.length-1}});
+		app.updateDataMenus({add: {fileName: o.fileName, index: this.openData.length-1}});
 	},
 	updateDataMenus(o = {}) {
 		console.log('x');
@@ -7296,8 +6228,8 @@ var app = {
 	},
 	async findGoodDecisions() {
 		if (!currentBn._decisionNodes.length) {
-			popupDialog("<p>This network has no decision nodes.<div class=controls><button type=button class=okButton>OK</button></div>");
-			$(".dialog .okButton").one("click", dismissDialogs);
+			dialog.popup("<p>This network has no decision nodes.<div class=controls><button type=button class=okButton>OK</button></div>");
+			$(".dialog .okButton").one("click", dialog.dismissAll);
 			return;
 		}
 		var str = "";
@@ -7312,8 +6244,8 @@ var app = {
 		for (var i=0; i<dec.length; i++) {
 			str += "<div>"+dec[i] + "</div>";
 		}
-		popupDialog(str+"<div class=controls><button type=button class=okButton>OK</button></div>");
-		$(".dialog .okButton").one("click", dismissDialogs);
+		dialog.popup(str+"<div class=controls><button type=button class=okButton>OK</button></div>");
+		$(".dialog .okButton").one("click", dialog.dismissAll);
 	},
 	clearEvidence: function() {
 		currentBn.guiSetEvidence({},{reset:true});
@@ -7408,8 +6340,8 @@ var app = {
 	**/
 	showProbabilityOfEvidence: function() {
 		currentBn.calcProbabilityOfEvidence(function(prob, selfInfo) {
-			popupDialog('<div>The probability of the evidence is <strong>'+sigFig(prob,4)+'</strong>. The self-information (-log(P)) in nits is <strong>'+sigFig(selfInfo,3)+'</strong>.</div><button type=button class=okButton>OK</button></div>');
-			$(".dialog .okButton").one("click", dismissDialogs);
+			dialog.popup('<div>The probability of the evidence is <strong>'+sigFig(prob,4)+'</strong>. The self-information (-log(P)) in nits is <strong>'+sigFig(selfInfo,3)+'</strong>.</div><button type=button class=okButton>OK</button></div>');
+			$(".dialog .okButton").one("click", dialog.dismissAll);
 		});
 	},
 	setUpdateMethod(method, useWorkers, menuEl = null) {
@@ -7735,7 +6667,7 @@ var app = {
 		$('#openDataFile').one('change', function() {
 			app.readChosenFile(this, function(fileData, fileName) {
 				app.loadData(fileData, {fileName});
-				currentBn.addNodes(openData[openData.length-1]);
+				currentBn.addNodes(this.openData.at(-1));
 				currentBn.display();
 				currentBn.compile();
 				app.updateBN(_=>app.autoLayout());
@@ -7746,7 +6678,7 @@ var app = {
 		$('#openDataFile').one('change', function() {
 			app.readChosenFile(this, function(fileData, fileName) {
 				app.loadData(fileData, {fileName});
-				currentBn.learnParametersCounting(openData[openData.length-1]);
+				currentBn.learnParametersCounting(this.openData.at(-1));
 				app.updateBN();
 			});
 		}).click();
@@ -7755,7 +6687,7 @@ var app = {
 		$('#openDataFile').one('change', function() {
 			app.readChosenFile(this, function(fileData, fileName) {
 				app.loadData(fileData, {fileName});
-				currentBn.learnParametersEm(openData[openData.length-1]).then(() => app.updateBN());
+				currentBn.learnParametersEm(this.openData.at(-1)).then(() => app.updateBN());
 			});
 		}).click();
 	},
@@ -7763,9 +6695,9 @@ var app = {
 		$('#openDataFile').one('change', function() {
 			app.readChosenFile(this, function(fileData, fileName) {
 				app.loadData(fileData, {fileName});
-				data = openData[openData.length-1];
+				data = this.openData.at(-1);
 				var attrs = Object.keys(data[0]);
-				var $dlg = popupDialog(`
+				var $dlg = dialog.popup(`
 					<h2>${method.name} Learner</h2>
 					<div class=text>
 					<p>Please choose the class node:
@@ -7774,10 +6706,10 @@ var app = {
 					</ul>
 					</div>
 				`, {buttons: [
-					$('<button>').text('Cancel').on('click', dismissDialogs)
+					$('<button>').text('Cancel').on('click', dialog.dismissAll)
 				]});
 				$dlg.on('click', 'a', function(event) {
-					dismissDialogs();
+					dialog.dismissAll();
 					var classNode = $(this).data("node");
 					if (currentBn.nodes.length) {
 						app.openBn(new BN());
@@ -7798,11 +6730,11 @@ var app = {
 	},
 	autoReparameterize(index = null) {
 		let func = null;
-		index ??= openData.length-1;
+		index ??= this.openData.length-1;
 		currentBn.addListener('structureChange', func = _=> {
 			console.log('xxxxxxxxxxx');
 			console.time('learn');
-			currentBn.learnParametersCounting(openData[index]);
+			currentBn.learnParametersCounting(this.openData[index]);
 			console.timeEnd('learn');
 			currentBn.updateAndDisplayBeliefs();
 		});
@@ -7895,7 +6827,7 @@ var app = {
 				currentBn.updateAndDisplayBeliefs();
 				
 				/*app.loadData(fileData, {fileName});
-				currentBn.addNodes(openData[openData.length-1]);
+				currentBn.addNodes(this.openData.at(-1));
 				currentBn.display();
 				currentBn.compile();
 				app.updateBN(_=>app.autoLayout());*/
@@ -8728,32 +7660,32 @@ var app = {
 		$('#openDataFile').change(function() {
 			app.readChosenFile(this, (fileData,fileName) => {
 				app.loadData(fileData, {fileName});
-				currentBn.addNodes(openData[openData.length-1]);
+				currentBn.addNodes(this.openData.at(-1));
 				currentBn.display();
-				app.autoReparameterize(openData.length-1);
+				app.autoReparameterize(this.openData.length-1);
 				currentBn.compile();
 				app.autoLayout();
 				app.updateBN(_=> {
 				});
-				notifyMessage('Loaded. Add arcs to auto-reparameterize. (So long as dataset isn\'t too large!)');
+				dialog.message('Loaded. Add arcs to auto-reparameterize. (So long as dataset isn\'t too large!)');
 			});
 		}).click();
 		dismissActiveMenus();
 	},
 	showShortcuts: function() {
-		popupDialog(`<h2>Keyboard Shortcuts</h2><div class="shortcutList text">`
-			+ Object.entries(keyboardShortcuts).map(k => `<div>
+		dialog.popup(`<h2>Keyboard Shortcuts</h2><div class="shortcutList text">`
+			+ Object.entries(this.keyboardShortcuts).map(k => `<div>
 				<label class=shortcutLabel>`+toHtml(k[0])+`</label><span class=desc>`+toHtml(k[1].label)+`</span>
 			</div>`).join('') + `</div>`, {className: 'keyboardShortcuts', buttons:[
-				$('<button type=button>').text('OK').on('click', dismissDialogs),
+				$('<button type=button>').text('OK').on('click', dialog.dismissAll),
 			]});
 	},
 	about: function() {
 		$.get('LICENSE', function(licenseString) {
-			popupDialog(`<h2><img class="mbIcon" src="_/images/makeBelieve.png"> Make-Believe</h2>
+			dialog.popup(`<h2><img class="mbIcon" src="_/images/makeBelieve.png"> Make-Believe</h2>
 				<div>Release `+titlePostfix.replace(/^.*\(R?(.*)\)$/, '$1')+`</div>
 				<div class=license>`+toHtml(licenseString).replace(/\n\n/g, '<p>')+`</div>`, {className: 'about', buttons:[
-				$('<button type=button>').text('OK').on('click', dismissDialogs),
+				$('<button type=button>').text('OK').on('click', dialog.dismissAll),
 			]});
 		}, 'text');
 	},
@@ -8872,6 +7804,13 @@ var EachValidator = class {
 
 
 $(document).ready(function() {
+	// Set the query string
+	Object.defineProperty(window, 'qs', {
+		get(prop) {
+			return getQs();
+		}
+	});
+
 	var exampleBns = `Asia.xdsl|Bunce's Farm.xdsl|Cancer.dne|Continuous Test.xdsl|Logical Gates.xdsl|
 		NativeFish_V1.xdsl|RS Latch.xdsl|Umbrella.xdsl|Water.xdsl`.split(/\s*\|\s*/);
 	var exampleBnActions = [];
@@ -9121,7 +8060,7 @@ $(document).ready(function() {
 	});
 
 	/// Setup initial keyboard shortcuts (these can be overriden after the fact)
-	Object.assign(keyboardShortcuts, app.menu.collectShortcuts());
+	Object.assign(app.keyboardShortcuts, app.menu.collectShortcuts());
 	let isShortcutKeyDown = false;
 	$(document).on('keydown', function(event) {
 		if (isShortcutKeyDown)  return;
@@ -9133,10 +8072,10 @@ $(document).ready(function() {
 				+ (event.metaKey?'Meta-':'')
 				+ event.key[0].toUpperCase()+event.key.slice(1);
 			//onsole.log(keyHash);
-			if (keyboardShortcuts[keyHash]) {
+			if (app.keyboardShortcuts[keyHash]) {
 				isShortcutKeyDown = true;
 				event.preventDefault();
-				keyboardShortcuts[keyHash].action();
+				app.keyboardShortcuts[keyHash].action();
 				return false;
 			}
 		}
@@ -9162,7 +8101,7 @@ $(document).ready(function() {
 			for (var i=0; i<10; i++) {
 				checks += "<div class='timestep time"+i+"'>"+selectStr+"</div>";
 			}
-			popupDialog("Please specify the evidence for each time slice:"
+			dialog.popup("Please specify the evidence for each time slice:"
 				+checks
 				+"<div class=controls><button type=button class='okButton'>OK</button></div>");
 			var t = 0;
@@ -9185,7 +8124,8 @@ $(document).ready(function() {
 					}
 					t++;
 				});
-				dismissDialogs(function(){currentBn.updateAndDisplayBeliefs()});
+				dialog.dismissAll();
+				currentBn.updateAndDisplayBeliefs();
 			});
 		}
 		else {
@@ -9684,13 +8624,13 @@ $(document).ready(function() {
 								numCycles += !addToNode(node);
 							}
 							if (numCycles>0) {
-								notifyError(`Could not add ${numCycles} arcs as ${numCycles==1?'it would create a cycle':'they would create cycles'}.<br>(And making DBNs not supported yet.)`);
+								dialog.error(`Could not add ${numCycles} arcs as ${numCycles==1?'it would create a cycle':'they would create cycles'}.<br>(And making DBNs not supported yet.)`);
 							}
 						}
 						/// If endNode is single node, add directly to it
 						else {
 							if (!addToNode(endNode)) {
-								notifyError('Cannot add arc as it would create a cycle.<br>(And making DBNs not supported yet.)');
+								dialog.error('Cannot add arc as it would create a cycle.<br>(And making DBNs not supported yet.)');
 							}
 						}
 					}
@@ -9732,14 +8672,14 @@ $(document).ready(function() {
 										endNode.guiAddParents([thisStartNode]);
 									}
 									currentBn.guiUpdateAndDisplayForLast();
-									dismissDialogs();
+									dialog.dismissAll();
 								}}})
 							);
 							nodes.appendChild(li);
 							lastNode = node;
 						};
-						popupDialog([`Select the node you wish to be the child:`, nodes], {buttons:[
-							n('button', 'Cancel', {type:'button', on:{click:dismissDialogs}}),
+						dialog.popup([`Select the node you wish to be the child:`, nodes], {buttons:[
+							n('button', 'Cancel', {type:'button', on:{click:dialog.dismissAll}}),
 						]});
 					}
 					/// Make a new node especially
@@ -10221,14 +9161,13 @@ $(document).ready(function() {
 			app.updateBN();
 		}
 		else if (window.qs.file) {
-			loadFromServer(window.qs.file, _=>{
-				app.updateBN(_=>{
-					if (window.parent !== window)  window.parent.postMessage({type:'fileLoaded'});
-				});
+			await app.loadFromServer(window.qs.file);
+			app.updateBN(_=>{
+				if (window.parent !== window)  window.parent.postMessage({type:'fileLoaded'});
 			});
 		}
 		else {
-			let bn = new BN({filename: `bn${++guiBnCount}.xdsl`});
+			let bn = new BN({filename: `bn${++app.bnCount}.xdsl`});
 			app.openBn(bn);
 			currentBn.display();
 		}

@@ -167,6 +167,165 @@ function clone(objectToBeCloned) {
   return objectClone;
 }
 
+/// Adds a default |setXXX| function for every property in the object,
+/// unless one is already specified in the chain. This should be called
+/// on the constructor (i.e. addDefaultSetters(Object)) as well as
+/// *inside* the constructor at the end of property initialisations
+/// (i.e. addDefaultSetters(this)).
+///
+/// For addDefaultSetters(Object), it will create
+/// an object (that's empty), and assigned setters to the prototype based on that.
+/// However, the constructor might set things up differently in a given circumstance,
+/// so it's often required to addDefaultSetters(this) as well.
+function addDefaultSetters(Obj) {
+	var o = Obj;
+	var proto = o.__proto__;
+	var assignTo = o;
+	if (typeof(Obj)=="function") {
+		o = new Obj({__noinit:true});
+		proto = Obj.prototype;
+		assignTo = proto;
+	}
+	for (var i in o) { (function(i){
+		if (!(i in proto)) {
+			var setterName = 'set'+i[0].toUpperCase()+i.slice(1);
+			if (!(setterName in assignTo)) {
+				Object.defineProperty(assignTo, setterName, {
+					configurable:true,writable:true,enumerable:false,value: function(val) {
+					this[i] = val;
+					return this;
+				}
+				});
+			}
+		}
+	})(i); }
+}
+
+// Not such a good idea, given no way to distinguish length and methods like filter, etc.
+// /// Add a property to an array, and make sure it isn't enumerable
+// function setArrayProperty(obj, prop, value) {
+	// Object.defineProperty(obj, prop, {configurable:true, writable:true, enumerable: false, value});
+// }
+
+function toChance(v) {
+	if (v>0 && v<1) {
+		return String(v).substr(1);
+	}
+	if (v == 0 || v == 1) {
+		return String(v);
+	}
+	return "x";
+}
+
+function toPercent(num, dp, fromPercentNum) {
+	if (!dp) { dp = 0; }
+	var mul = Math.pow(10, dp);
+	if (isNaN(num) && num.search(/%/)!=-1) {
+		return num;
+	}
+	else if (!fromPercentNum) {
+		return Math.round(num*100*mul)/mul + "%";
+	}
+	else {
+		return Math.round(num*mul)/mul + "%";
+	}
+}
+
+function toHtml(str) {
+	if (str===null || str===undefined)  return "";
+	str = ""+str;
+	str = str
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;');
+	return str;
+}
+
+/**
+	Normalise a pseudo-probability vector to a probability vector.
+*/
+function normalize(vec) {
+	var sum = 0;
+	for (var i=0; i<vec.length; i++)  if (vec[i]>0)  sum += vec[i];
+
+	var newVec = new Array(vec.length);
+	if (sum>0) {
+		for (var i=0; i<vec.length; i++)  newVec[i] = vec[i]>0 ? vec[i]/sum : 0;
+	}
+	else {
+		for (var i=0; i<vec.length; i++)  newVec[i] = 1/vec.length;
+	}
+
+	return newVec;
+}
+
+function klDiv(distro1, distro2) {
+	if (distro1.length != distro2.length)  return 0;
+
+	var sum = 0;
+	for (var i=0; i<distro1.length; i++) {
+		if (distro1[i]!=0) {
+			sum += distro1[i] * Math.log(distro1[i]/distro2[i]);
+		}
+	}
+
+	return sum;
+}
+
+String.prototype._splitNotEmpty = function() {
+	return this.length==0 ? [] : this.split.apply(this, arguments);
+}
+
+function baseName(fileName) {
+	var m = fileName.match(/[^/]*$/);
+	if (m) {
+		return m[0];
+	}
+	return null;
+}
+
+/// Create a new JS array of the given |size|, with all entries set to the |initial| value
+function newArray(size, initial) {
+	var arr = new Array(size);
+
+	for (var i=0; i<size; i++) {
+		arr[i] = clone(initial);
+	}
+
+	return arr;
+}
+
+/// Overwrite each value in the |arr| array with the value |initial|
+function renewArray(arr, initial) {
+	var size = arr.length;
+
+	for (var i=0; i<size; i++) {
+		arr[i] = clone(initial);
+	}
+
+	return arr;
+}
+
+/// The |initialStates| and |nextStates| functions can be used together
+/// to step through every row in a CPT, with indexes pointing back to each parent state.
+/// Run |initialStates| on the list of parent nodes, to initialise an array of state indexes,
+/// and then use |nextStates| in a loop to iterate through each valid combination of
+/// parent states. |nextStates| returns true so long as there are more combinations
+/// to visit before returning to the initial combination of states.
+function initialStates(nodes) {
+	return newArray(nodes.length, 0);
+}
+
+function nextStates(nodes, states) {
+	for (var j=nodes.length-1; j>=0; j--) {
+		states[j]++;
+		if (states[j] < nodes[j].states.length)  break;
+		else                                      states[j] = 0;
+	}
+	return j >= 0;
+}
+
 // Helper function to copy static and prototype properties from a mixin and its prototypes
 function copyProperties(target, source) {
 	while (source) {
@@ -2315,40 +2474,6 @@ jQuery.event.special.touchmove = {
 };
 }
 
-/** Pops up a HTML dialog, can be modal **/
-/*function popupDialog(msg, width, modal, toFocus) {
-	if (typeof(width)=="object" && width != null) { opts = width; width = null; }
-	else { opts = {}; }
-	var dlg = document.createElement("div");
-	dlg.className = "dialog";
-	dlg.id = opts.id ? opts.id : "popupDialog";
-	dlg.style.display = "block";
-	dlg.style.width = width;
-	dlg.innerHTML = msg;
-	document.body.appendChild(dlg);
-	dlg.style.left = opts.left ? opts.left+"px"
-		: (getScrollLeft()+getInnerWindowWidth()-getElWidth(dlg))/2+"px";
-	dlg.style.top = opts.top ? opts.top+"px"
-		: (getScrollTop()+(getInnerWindowHeight()-getElHeight(dlg))/2)+"px";
-	if (modal) {
-		showModalBackground(dlg);
-	}
-	if (toFocus) {
-		gbid(toFocus).focus();
-	}
-}
-
-function dismissDialog(id) {
-	if (!id) { id = "popupDialog"; }
-	if (gbid(id)) {
-		showSelectObjects(gbid(id));
-		document.body.removeChild(gbid(id));
-	}
-	if (gbid("modalBackdrop")) {
-		dismissModalBackground();
-	}
-}*/
-
 function labelClick(label) {
 	var forText = label.getAttribute("for");
 	if (!forText) { forText = label.getAttribute("htmlFor"); }
@@ -3033,99 +3158,6 @@ function crumbNameUnescape(name) {
 	return unescape(name.replace(/_/g, '%'));
 }
 
-var hfsArgs = {};
-function handleFormSave(sel, where, selValue, callback) {
-	sel.selectedIndex = 0;
-	hfsArgs = {sel: sel, where: where, selValue: selValue, callback: callback};
-	var whereBegin = isCrumbLocation(where) ? '.' : '&name=';
-	if (selValue=="~~Save~Search") {
-		var dStr = '<h2>Save Search</h2> \
-			<div>What do you want to name the search?</div> \
-			<div><input type="text" id="handleFormSave_name" value="" onkeydown="e=geo(event); if (e.keyCode==13) { return handleFormSave_Save(hfsArgs.sel, hfsArgs.where, hfsArgs.callback, this.value); }" /></div> \
-			<div class="controls"><input type="button" value="Save" onclick="handleFormSave_Save(hfsArgs.sel, hfsArgs.where, hfsArgs.callback, gbid(\'handleFormSave_name\').value);" /> <input type="button" value="Cancel" onclick="dismissDialog()"/></div>';
-		popupDialog(dStr, '20em', true, "handleFormSave_name");
-	}
-	else if (selValue=="~~Save~Search~All") {
-		var dStr = '<h2>Save Search for All</h2> \
-			<div>What do you want to name the search?</div> \
-			<div><input type="text" id="handleFormSave_name" value="" onkeydown="e=geo(event); if (e.keyCode==13) { return handleFormSave_Save(hfsArgs.sel, hfsArgs.where, hfsArgs.callback, this.value); }" /></div> \
-			<div class="controls"><input type="button" value="Save" onclick="handleFormSave_Save(hfsArgs.sel, hfsArgs.where, hfsArgs.callback, gbid(\'handleFormSave_name\').value, true);" /> <input type="button" value="Cancel" onclick="dismissDialog()"/></div>';
-		popupDialog(dStr, '20em', true, "handleFormSave_name");
-	}
-	else if (selValue=="~~Delete~Search") {
-		var dStr = '<h2>Delete Search</h2> \
-			<div>Select the searches you want to delete.</div> \
-			<div><select id="handleFormSave_names" multiple size="6">';
-		for (var si=0; si<sel.options.length; si++) {
-			if (sel.options[si].value.search(/^~~/)==-1 && sel.options[si].value.search(/^--/)==-1) {
-				dStr += '<option value="'+sel.options[si].value+'">'+sel.options[si].text+'</option>';
-			}
-		}
-		dStr += '</select></div> \
-			<div class="controls"><input type="button" value="Delete" onclick="handleFormSave_Delete(hfsArgs.sel, hfsArgs.where, hfsArgs.callback, gbid(\'handleFormSave_names\'));" /> <input type="button" value="Cancel" onclick="dismissDialog()"/></div>';
-		popupDialog(dStr, '20em', true);
-	}
-	else if (selValue=="~~Delete~Search~All") {
-		var dStr = '<h2>Delete Search</h2> \
-			<div>Select the searches you want to delete.</div> \
-			<div><select id="handleFormSave_names" multiple size="6">';
-		for (var si=0; si<sel.options.length; si++) {
-			if (sel.options[si].value.search(/^~~/)==-1 && sel.options[si].value.search(/^--/)!=-1) {
-				dStr += '<option value="'+sel.options[si].value+'">'+sel.options[si].text+'</option>';
-			}
-		}
-		dStr += '</select></div> \
-			<div class="controls"><input type="button" value="Delete" onclick="handleFormSave_Delete(hfsArgs.sel, hfsArgs.where, hfsArgs.callback, gbid(\'handleFormSave_names\'), true);" /> <input type="button" value="Cancel" onclick="dismissDialog()"/></div>';
-		popupDialog(dStr, '20em', true);
-	}
-	else if (selValue.search(/^~~/)==-1) {
-		var forAll = false;
-		if (selValue.search(/^--/)!==-1) {
-			selValue = selValue.replace(/^--/, '');
-			forAll = true;
-		}
-		loadSearchForm(sel.form, where, callback, selValue, forAll, sel);
-	}
-}
-
-function handleFormSave_Save(sel, where, callback, name, forAll) {
-	var form = sel.form;
-	for (var i=0; i<sel.options.length; i++) {
-		if (sel.options[i].value==name) {
-			if (!confirm("The name exists already. Overwrite?")) {
-				return;
-			}
-		}
-	}
-	dismissDialog();
-	saveSearchForm(form, where, callback, name, forAll);
-	sel.options[sel.options.length] = new Option(name, name);
-}
-
-function handleFormSave_Delete(sel, where, callback, namesSel, forAll) {
-	var startSaved = 0;
-	for (var si=0; si<sel.options.length; si++) {
-		if (sel.options[si].value.search(/^~~/)==-1) {
-			startSaved = si;
-			break;
-		}
-	}
-	for (var si=0; si<namesSel.options.length; si++) {
-		if (namesSel.options[si].selected) {
-			var searchName = namesSel.options[si].value;
-			if (searchName.search(/^--/)!=-1) {
-				searchName = searchName.replace(/^--/, '');
-			}
-			else {
-				continue;
-			}
-			deleteSavedSearch(where, callback, searchName, forAll);
-			sel.options[si+startSaved] = null;
-		}
-	}
-	dismissDialog();
-}
-
 function getScriptArgs() {
 	var args = {};
 	var latestEl = document; while (latestEl.lastChild) {latestEl = latestEl.lastChild;}
@@ -3286,14 +3318,17 @@ function tableToCsv(table, opts) {
 }
 
 function getQs() {
-	var params = {};
-	var argSpecs = window.location.search.substring(1).split('&');
-	for (var i in argSpecs) {
-		var argInfo = argSpecs[i].split('=');
-		params[unescape(argInfo[0])] = unescape(argInfo[1]);
+	let params = {};
+	if (window.location.search) {
+		let argStrs = window.location.search.slice(1).split('&');
+		for (let argStr of argStrs) {
+			let [key,value] = argStr.split('=');
+			params[unescape(key)] = unescape(value);
+		}
 	}
 	return params;
 }
+
 
 if (typeof(exports)!='undefined') {
 	Object.assign(exports, {
