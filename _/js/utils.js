@@ -110,6 +110,63 @@ function allocFloat32(length) {
 	return new Float32Array(length);
 }
 
+/// Cloning/duplication/etc.
+function copyTo(from, to, o = {}) {
+	o.existingOnly ??= false;
+	let objs = new Map();
+	let _copyTo = (from,to) =>{
+		objs.set(from,to);
+		for (let [k,v] of Object.entries(from)) {
+			if (o.existingOnly && !(k in to))  continue;
+			/// Never duplicate HTML elements
+			if ((typeof(v)!='object' || v==null) || v instanceof HTMLElement) {
+				to[k] = v;
+			}
+			else {
+				if (objs.has(v)) {
+					to[k] = objs.get(v);
+				}
+				else {
+					if (typeof(to[k])!='object' || to[k]==null)  to[k] = new v.constructor();
+					_copyTo(v, to[k]);
+				}
+			}
+		}
+	};
+	_copyTo(from,to);
+	return to;
+}
+/// From https://developer.mozilla.org/en-US/docs/Web/Guide/API/DOM/The_structured_clone_algorithm
+function clone(objectToBeCloned) {
+  // Basis.
+  if (!(objectToBeCloned instanceof Object)) {
+	return objectToBeCloned;
+  }
+
+  var objectClone;
+
+  // Filter out special objects.
+  var Constructor = objectToBeCloned.constructor;
+  switch (Constructor) {
+	// Implement other special objects here.
+	case RegExp:
+	  objectClone = new Constructor(objectToBeCloned);
+	  break;
+	case Date:
+	  objectClone = new Constructor(objectToBeCloned.getTime());
+	  break;
+	default:
+	  objectClone = new Constructor();
+  }
+
+  // Clone each property.
+  for (var prop in objectToBeCloned) {
+	objectClone[prop] = clone(objectToBeCloned[prop]);
+  }
+
+  return objectClone;
+}
+
 // Helper function to copy static and prototype properties from a mixin and its prototypes
 function copyProperties(target, source) {
 	while (source) {
@@ -258,7 +315,7 @@ function convertToJson(obj, convert = {}) {
 	{ let i=0; e.stack.replace(/\n/g, _=>++i); if (i>100)  throw e; }
 	let _do = (obj, convert = {}) => {
 		if (seen.has(obj))  throw new Error('Circular reference in convertToJson');
-		if (obj instanceof HTMLElement)  throw new Error('HTMLElement in convertToJson: '+obj.outerHTML);
+		if (typeof(HTMLElement)!='undefined' && obj instanceof HTMLElement)  throw new Error('HTMLElement in convertToJson: '+obj.outerHTML);
 		seen.add(obj);
 		let toOmit = convert?.toJSON?._omit ?? null;
 		let toPick = convert?.toJSON?._pick ?? null;
@@ -2320,7 +2377,7 @@ function inspectObj(obj) {
 function handleSaveForm(formName, exec) {
 	handleSaveForm_exec = exec;
 	handleSaveForm_formName = formName;
-	window.onkeypress = function(event) {
+	window.onkeydown = function(event) {
 		event = geo(event);
 		if ((event.altKey || event.ctrlKey) && ((event.which | 32)==115 || (event.keyCode | 32)==115) ) {
 			if (handleSaveForm_exec) {

@@ -1,5 +1,5 @@
 (function(global) {
-	let ISCHAIN = Symbol('ISCHAIN');
+	let allChains = new WeakSet();
 	let namespaces = {
 		'svg': 'http://www.w3.org/2000/svg',
 		/// s is a custom alias
@@ -21,6 +21,10 @@
 		let parts = tag.split(/(?=[.#])/);
 		tag = parts[0];
 		let attrs = parts.slice(1);
+		if (typeof(namespaces[ns])=='function') {
+			/// Handover most of the handling to the namespace function handler
+			return namespaces[ns](tag, attrs, ...args);
+		}
 		let el = ns ? document.createElementNS(namespaces[ns], tag) : document.createElement(tag);
 		let attr = null;
 		let arg = null;
@@ -37,6 +41,7 @@
 		
 		return el;
 	}
+	node.namespaces = namespaces;
 
 	function qnode(tag, ...args) {
 		let el = document.createElement(tag);
@@ -66,7 +71,7 @@
 		else if (arg.nodeType && arg.nodeName) {
 		//else if (arg instanceof Element || arg instanceof DocumentFragment) {
 			/// XXX: DOM doesn't like proxies 
-			containerEl.appendChild(arg?.[ISCHAIN] ? arg.raw : arg);
+			containerEl.appendChild(chain.raw(arg));
 		}
 		else if (Array.isArray(arg)) {
 			let args = arg;
@@ -145,6 +150,26 @@
 		return range.extractContents();
 	}
 
+	function vec(arr) {
+		if (!('length' in arr))  return arr;
+		let proxy = new Proxy(function(){}, {
+			get(target, p) {
+				if (!isNaN(p)) {
+					return arr[p];
+				}
+				if (p=='raw') {
+					return arr;
+				}
+				return vec(Array.from(arr, v => typeof(v[p])=='function' ? v[p].bind(v) : v[p]));
+			},
+			apply(target,thisArg,args) {
+				return vec(Array.from(arr, v => v(...args)));
+			}
+		});
+		proxy.raw = arr;
+		return proxy;
+	}
+
 	/** This restores jquery like chaining --- but for any object at all! **/
 	function chain(o, opts = {}) {
 		function chainPromise(prom, opts = {}, prevProp = null) {
@@ -168,8 +193,7 @@
 			return proxy;
 		}
 
-		let chainSym = Symbol('chain');
-		if (typeof(o)!='object' || o == null || o[chainSym])  return o;
+		if (typeof(o)!='object' || o == null || allChains.has(o))  return o;
 		let handler = {get(target,prop,receiver,noCustomProps) {
 			if (!noCustomProps) {
 				if (prop === 'my') {
@@ -184,6 +208,10 @@
 				else if (prop === 'rootNew') {
 					opts.root = proxy;
 					return proxy;
+				}
+				/// The '.all' syntax is temporary, until I decide how to merge vec in.
+				else if (prop === 'all') {
+					return vec('length' in target ? target : [target]) ;
 				}
 				else if (prop === 'set') {
 					/** return function to set things **/
@@ -239,6 +267,7 @@
 						}*/
 						return (callback,...otherArgs) => {
 							return chain([...target][prop]((...args) => callback(...args),...otherArgs), opts);
+							// return [...target][prop]((...args) => callback(...args),...otherArgs);
 						}
 					}
 					/* otherwise, if in Array.prototype */
@@ -257,7 +286,7 @@
 					let val = null;
 					/// DOM objects are ultra-boring. Have to make sure proxies are unwrapped.
 					if (target instanceof HTMLElement) {
-						val = target[prop](...args.map(a => a?.[ISCHAIN] ? a.raw : a));
+						val = target[prop](...args.map(a => chain.raw(a)));
 					}
 					else {
 						val = target[prop](...args);
@@ -293,22 +322,45 @@
 			}
 		},
 		/** erm, this is needed because (at least) assigning to DOM elements doesn't work with the pass through **/
-		set(target,prop,value,received) {
+		set(target,prop,value,receiver) {
 			target[prop] = value;
 			return true;
 		}};
 		let proxy = new Proxy(o, handler);
-		proxy[chainSym] = true;
-		proxy[ISCHAIN] = true;
+		allChains.add(proxy);
 		opts.root ??= proxy;
 		return proxy;
 	}
+	chain.raw = (obj) => {
+		return allChains.has(obj) ? obj.raw : obj;
+	};
 
 	global.node = node;
 	global.qnode = qnode;
 	global.n = n;
 	global.toHtml = toHtml;
 	global.html = html;
-	global.q = str => chain(typeof(str)=='string' ? document.querySelector(str) : str?.jquery ? str[0] : str);
-	global.qa = str => chain(typeof(str)=='string' ? document.querySelectorAll(str) : str?.jquery ? q(str.toArray()) : str);
+	global.vec = vec;
+	global.q = (str,str2) => {
+		str = chain.raw(str);
+		return chain(
+			typeof(str)=='string'
+				&& typeof(str2)=='string' ? (q(str)?.q?.(str) ?? null) :
+			typeof(str)=='string'         ? document.querySelector(str) :
+			str?.querySelector && str2    ? str.querySelector(str2) :
+			str?.jquery                   ? str[0] :
+			str
+		);
+	};
+	global.qa = (str,str2) => {
+		str = chain.raw(str);
+		return chain(
+			typeof(str)=='string'
+				&& typeof(str2)=='string'   ? qa(str).map(el => [...q(el).qa(str2).raw]).raw.flat() :
+			typeof(str)=='string'           ? document.querySelectorAll(str) :
+			str?.querySelectorAll && str2   ? str.querySelectorAll(str2) :
+			str?.jquery                     ? q(str.toArray()) :
+			str
+		);
+	}
 })(window || global);

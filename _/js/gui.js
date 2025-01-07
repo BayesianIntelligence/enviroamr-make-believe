@@ -699,11 +699,11 @@ if (typeof(window)!="undefined")  window.qs = getQs();
 /// then calls the callback
 function loadFromServer(fileName, callback) {
 	var format = fileName.replace(/^.*\.([^.]*)$/, '$1');
-	if (!FILE_EXTENSIONS[format]) {
+	if (!BN.FILE_EXTENSIONS[format]) {
 		format = "xdsl";
 	}
 	/// Handle binary differently to text
-	let fileExtInfo = FILE_EXTENSIONS[format];
+	let fileExtInfo = BN.FILE_EXTENSIONS[format];
 	if (fileExtInfo.text) {
 		$.get(fileName, function(data) {
 			let bn = new BN({source: data, outputEl: $(".bnview"), format: format, fileName: baseName(fileName), onload: callback});
@@ -7084,15 +7084,8 @@ var app = {
 	*/
 	fileLoaded(file, callback) {
 		var fileName = baseName(file.name);
-		let format = getFileType(fileName);
-		/*var format = file.name.replace(/^.*\.([^.]*)$/, '$1');
-		/// Assume xdsl if extension not recognised (XXX probably should at least throw a warning before
-		/// the inevitable failure to load anything)
-		console.log(format);
-		if (!FILE_EXTENSIONS[format]) {
-			format = "xdsl";
-		}*/
-		let fileExtInfo = getFileTypeInfo(format); //FILE_EXTENSIONS[format];
+		let format = BN.getFileType(fileName);
+		let fileExtInfo = BN.getFileTypeInfo(format);
 
 		//onsole.debug(file);
 		var reader = new FileReader();
@@ -10265,6 +10258,10 @@ var styles = {add: addStyles};
 
 /// Example: postMessage(['currentBn', 'addNode', ['Hello']])
 window.addEventListener('message', event => {
+	if (!window[event.data[0]]) {
+		console.error('Received an unrecognised postMessage');
+		return;
+	}
 	let retValue = window[event.data[0]][event.data[1]](...(event.data[2] ?? []));
 	let toReturn = [retValue];
 	toReturn.type = 'return';

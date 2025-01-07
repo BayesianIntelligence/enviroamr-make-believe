@@ -190,7 +190,7 @@ MenuAction.prototype = {
 		item.addEventListener('mouseleave', function(evt) {
 			evt.target.closest('.menuAction').classList.remove("active");
 		});
-		item.addEventListener('keypress', function(evt) {
+		item.addEventListener('keydown', function(evt) {
 			if (evt.key == "Enter") {
 				this.click();
 			}

@@ -111,14 +111,14 @@ cancerNode
 	.addChildren(["XRay","Dyspnoea"]);
 
 console.apilog("Set all the CPTs")
-cancerNode.cpt = [.03,        0.97,         // low       True
+cancerNode.def.set([.03,        0.97,         // low       True
 		   0.001,       0.999,        // low       False
 		   0.05,        0.95,         // high      True
-		   0.02,        0.98]
-xrayNode.cpt = [0.9,         0.1,          // True
-		   0.2,         0.8];
-dyspNode.cpt = [0.65,        0.35,         // True
-		   0.3,         0.7];
+		   0.02,        0.98]);
+xrayNode.def.set([0.9,         0.1,          // True
+		   0.2,         0.8]);
+dyspNode.def.set([0.65,        0.35,         // True
+		   0.3,         0.7]);
 
 bn.updateBeliefs();
 console.apilog("Cancer probs:", cancerNode.beliefs);

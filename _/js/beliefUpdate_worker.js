@@ -2,6 +2,9 @@ bn = null;
 timeLimit = null;
 
 if (typeof(exports)!='undefined') {
+	/// This imports things into the global context in node.js
+	/// This is fine for now, but need to change how everything is accessed once
+	/// I move to modules.
 	importScripts = function(filename){
 		if (importScripts.loaded[filename]!=undefined)  return;
 		var fs = require('fs');
