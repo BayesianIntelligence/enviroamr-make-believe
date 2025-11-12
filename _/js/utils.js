@@ -1805,6 +1805,310 @@ function keyCount(arr) {
 	return c;
 }
 
+function wrapWidthEx(charCount, exPerEm = 0.5, aspect = 4 / 3) {
+  let charWidthEm = 0.8;
+  let charWidthEx = charWidthEm / exPerEm;
+
+  // Ideal block width (in characters) = sqrt(totalChars * aspectRatio)
+  let idealLineChars = Math.sqrt(charCount * aspect);
+
+  // Convert ideal line width in characters to ex units
+  let idealLineWidthEx = idealLineChars * charWidthEx;
+
+  return Math.round(idealLineWidthEx);
+}
+
+// function getBalancedWidth(el) {
+//   const clone = el.cloneNode(true);
+//   Object.assign(clone.style, {
+//     width: 'auto',
+//     height: 'auto',
+//     position: 'absolute',
+//     visibility: 'hidden',
+//     whiteSpace: 'normal',
+//     display: 'inline-block'
+//   });
+
+//   el.parentElement.appendChild(clone);
+
+//   let width = 10, height;
+
+//   // Coarse pass
+//   while (width < 2000) {
+//     clone.style.width = width + 'px';
+//     height = clone.offsetHeight;
+//     if (width / height >= 4 / 3) break;
+//     width += 10;
+//   }
+
+//   // Refine
+//   width -= 10;
+//   while (width < 2000) {
+//     clone.style.width = width + 'px';
+//     height = clone.offsetHeight;
+//     if (width / height >= 4 / 3) break;
+//     width += 1;
+//   }
+
+//   clone.remove();
+//   return width;
+// }
+
+function getBalancedWidth(el) {
+  const computed = window.getComputedStyle(el);
+  const clone = el.cloneNode(true);
+
+  // Extract padding/border/box-sizing
+  const paddingLeft = parseFloat(computed.paddingLeft);
+  const paddingRight = parseFloat(computed.paddingRight);
+  const borderLeft = parseFloat(computed.borderLeftWidth);
+  const borderRight = parseFloat(computed.borderRightWidth);
+  const extra = paddingLeft + paddingRight + borderLeft + borderRight;
+
+  Object.assign(clone.style, {
+    position: 'absolute',
+    visibility: 'hidden',
+    whiteSpace: 'normal',
+    overflowWrap: 'normal',
+    wordBreak: 'normal',
+    display: 'inline-block',
+    boxSizing: 'content-box',
+    width: 'auto',
+    height: 'auto',
+    padding: '0',
+    border: '0',
+    font: computed.font,
+    lineHeight: computed.lineHeight
+  });
+
+  clone.textContent = el.textContent;
+  document.body.appendChild(clone);
+
+  // Step 1: no-word-break minimum
+  let width = 10;
+  while (width < 2000) {
+    clone.style.width = width + 'px';
+    if (clone.scrollWidth <= clone.offsetWidth) break;
+    width += 1;
+  }
+
+  // Step 2: 4:3 aspect ratio
+  while (width < 2000) {
+    clone.style.width = width + 'px';
+    const height = clone.offsetHeight;
+    if (width / height >= 4 / 3) break;
+    width += 1;
+  }
+
+  document.body.removeChild(clone);
+
+  // Add back padding/border if el uses border-box
+  return computed.boxSizing === 'border-box' ? width + extra : width;
+}
+
+function getConnectionSegment(el1, el2) {
+  const scrollX = window.pageXOffset, scrollY = window.pageYOffset;
+
+  // get absolute rect for an element
+  function absRect(el) {
+    const r = el.getBoundingClientRect();
+    return {
+      left:   r.left   + scrollX,
+      right:  r.right  + scrollX,
+      top:    r.top    + scrollY,
+      bottom: r.bottom + scrollY
+    };
+  }
+
+  // parse one CSS border-radius value ("10px", "50%", "10px 20px")
+  function parseRadius(val, w, h) {
+    const parts = val.split(' ');
+    const [hVal, vVal = parts[0]] = parts;
+    const parse = (str, size) =>
+      str.endsWith('%')
+        ? parseFloat(str) / 100 * size
+        : parseFloat(str);
+    return { x: parse(hVal, w), y: parse(vVal, h) };
+  }
+
+  // read all four corner radii
+  function getRadii(el, rect) {
+    const style = getComputedStyle(el);
+    const w = rect.right - rect.left, h = rect.bottom - rect.top;
+    return {
+      tl: parseRadius(style.borderTopLeftRadius,     w, h),
+      tr: parseRadius(style.borderTopRightRadius,    w, h),
+      br: parseRadius(style.borderBottomRightRadius, w, h),
+      bl: parseRadius(style.borderBottomLeftRadius,  w, h)
+    };
+  }
+
+  const r1 = absRect(el1), r2 = absRect(el2);
+  const radii1 = getRadii(el1, r1), radii2 = getRadii(el2, r2);
+  const mid1 = { x: (r1.left + r1.right)/2, y: (r1.top + r1.bottom)/2 };
+  const mid2 = { x: (r2.left + r2.right)/2, y: (r2.top + r2.bottom)/2 };
+
+  // find intersection of ray p1→p2 with a rounded-rect border
+  function intersect(p1, p2, rect, rad) {
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    const ts = [];
+
+    // straight edges (excluding rounded corners)
+    if (dx !== 0) {
+      // left edge
+      let t = (rect.left - p1.x) / dx;
+      let y = p1.y + t*dy;
+      if (t > 0 && y >= rect.top + rad.tl.y && y <= rect.bottom - rad.bl.y) ts.push(t);
+      // right edge
+      t = (rect.right - p1.x) / dx;
+      y = p1.y + t*dy;
+      if (t > 0 && y >= rect.top + rad.tr.y && y <= rect.bottom - rad.br.y) ts.push(t);
+    }
+    if (dy !== 0) {
+      // top edge
+      let t = (rect.top - p1.y) / dy;
+      let x = p1.x + t*dx;
+      if (t > 0 && x >= rect.left + rad.tl.x && x <= rect.right - rad.tr.x) ts.push(t);
+      // bottom edge
+      t = (rect.bottom - p1.y) / dy;
+      x = p1.x + t*dx;
+      if (t > 0 && x >= rect.left + rad.bl.x && x <= rect.right - rad.br.x) ts.push(t);
+    }
+
+    // quarter-ellipse corners
+    [
+      // top-left
+      { rx: rad.tl.x, ry: rad.tl.y, cx: rect.left + rad.tl.x, cy: rect.top + rad.tl.y,
+        cond: p => p.x >= rect.left && p.x <= rect.left + rad.tl.x && p.y >= rect.top && p.y <= rect.top + rad.tl.y },
+      // top-right
+      { rx: rad.tr.x, ry: rad.tr.y, cx: rect.right - rad.tr.x, cy: rect.top + rad.tr.y,
+        cond: p => p.x >= rect.right - rad.tr.x && p.x <= rect.right && p.y >= rect.top && p.y <= rect.top + rad.tr.y },
+      // bottom-right
+      { rx: rad.br.x, ry: rad.br.y, cx: rect.right - rad.br.x, cy: rect.bottom - rad.br.y,
+        cond: p => p.x >= rect.right - rad.br.x && p.x <= rect.right && p.y >= rect.bottom - rad.br.y && p.y <= rect.bottom },
+      // bottom-left
+      { rx: rad.bl.x, ry: rad.bl.y, cx: rect.left + rad.bl.x, cy: rect.bottom - rad.bl.y,
+        cond: p => p.x >= rect.left && p.x <= rect.left + rad.bl.x && p.y >= rect.bottom - rad.bl.y && p.y <= rect.bottom }
+    ].forEach(({rx, ry, cx, cy, cond}) => {
+      if (rx > 0 && ry > 0) {
+        const A = dx*dx/(rx*rx) + dy*dy/(ry*ry);
+        const B = 2*(dx*(p1.x-cx)/(rx*rx) + dy*(p1.y-cy)/(ry*ry));
+        const C = (p1.x-cx)**2/(rx*rx) + (p1.y-cy)**2/(ry*ry) - 1;
+        const D = B*B - 4*A*C;
+        if (D > 0) {
+          const sq = Math.sqrt(D);
+          [(-B - sq)/(2*A), (-B + sq)/(2*A)].forEach(t => {
+            if (t > 0) {
+              const px = p1.x + t*dx, py = p1.y + t*dy;
+              if (cond({ x: px, y: py })) ts.push(t);
+            }
+          });
+        }
+      }
+    });
+
+    if (!ts.length) return p1;
+    const tMin = Math.min(...ts);
+    return { x: p1.x + tMin*dx, y: p1.y + tMin*dy };
+  }
+
+  return {
+    start: intersect(mid1, mid2, r1, radii1),
+    end:   intersect(mid2, mid1, r2, radii2)
+  };
+}
+
+function getConnectionSegment(b1, b2) {
+  const mid1 = { x: (b1.left + b1.right) / 2, y: (b1.top + b1.bottom) / 2 };
+  const mid2 = { x: (b2.left + b2.right) / 2, y: (b2.top + b2.bottom) / 2 };
+
+  function intersect(p1, p2, rect, rad) {
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    const ts = [];
+
+    // straight edges
+    if (dx !== 0) {
+      let t, y;
+      t = (rect.left  - p1.x) / dx; y = p1.y + t * dy;
+      if (t > 0 && y >= rect.top  + rad.tl.y && y <= rect.bottom - rad.bl.y) ts.push(t);
+      t = (rect.right - p1.x) / dx; y = p1.y + t * dy;
+      if (t > 0 && y >= rect.top  + rad.tr.y && y <= rect.bottom - rad.br.y) ts.push(t);
+    }
+    if (dy !== 0) {
+      let t, x;
+      t = (rect.top    - p1.y) / dy; x = p1.x + t * dx;
+      if (t > 0 && x >= rect.left + rad.tl.x && x <= rect.right - rad.tr.x) ts.push(t);
+      t = (rect.bottom - p1.y) / dy; x = p1.x + t * dx;
+      if (t > 0 && x >= rect.left + rad.bl.x && x <= rect.right - rad.br.x) ts.push(t);
+    }
+
+    // rounded corners (quarter-ellipses)
+    const corners = [
+      { rx: rad.tl.x, ry: rad.tl.y, cx: rect.left  + rad.tl.x, cy: rect.top    + rad.tl.y, dir: 'tl' },
+      { rx: rad.tr.x, ry: rad.tr.y, cx: rect.right - rad.tr.x, cy: rect.top    + rad.tr.y, dir: 'tr' },
+      { rx: rad.br.x, ry: rad.br.y, cx: rect.right - rad.br.x, cy: rect.bottom - rad.br.y, dir: 'br' },
+      { rx: rad.bl.x, ry: rad.bl.y, cx: rect.left  + rad.bl.x, cy: rect.bottom - rad.bl.y, dir: 'bl' }
+    ];
+
+    corners.forEach(({rx, ry, cx, cy, dir}) => {
+      if (rx <= 0 || ry <= 0) return;
+      // solve (p1 + t·d − c)ᵀ·[1/rx² 0; 0 1/ry²]·(p1 + t·d − c) = 1
+      const A = dx*dx/(rx*rx) + dy*dy/(ry*ry);
+      const B = 2*(dx*(p1.x-cx)/(rx*rx) + dy*(p1.y-cy)/(ry*ry));
+      const C = (p1.x-cx)**2/(rx*rx) + (p1.y-cy)**2/(ry*ry) - 1;
+      const D = B*B - 4*A*C;
+      if (D <= 0) return;
+      const sq = Math.sqrt(D);
+      [(-B - sq)/(2*A), (-B + sq)/(2*A)].forEach(t => {
+        if (t <= 0) return;
+        const px = p1.x + t*dx, py = p1.y + t*dy;
+        // quadrant check
+        let inside = false;
+        if (dir === 'tl') inside = px <= cx && py <= cy;
+        if (dir === 'tr') inside = px >= cx && py <= cy;
+        if (dir === 'br') inside = px >= cx && py >= cy;
+        if (dir === 'bl') inside = px <= cx && py >= cy;
+        if (inside) ts.push(t);
+      });
+    });
+
+    if (!ts.length) return p1;
+    const tMin = Math.min(...ts);
+    return { x: p1.x + tMin * dx, y: p1.y + tMin * dy };
+  }
+
+  return {
+    start: intersect(mid1, mid2, b1, b1.radius),
+    end:   intersect(mid2, mid1, b2, b2.radius)
+  };
+}
+
+// parse one CSS border-radius value ("10px", "50%", "10px 20px")
+function parseRadius(val, w, h) {
+	const parts = val.split(' ');
+	const [hVal, vVal = parts[0]] = parts;
+	const parse = (str, size) =>
+		str.endsWith('%')
+		? parseFloat(str) / 100 * size
+		: parseFloat(str);
+	return { x: parse(hVal, w), y: parse(vVal, h) };
+}
+
+// read all four corner radii
+function getRadii(el, rect) {
+	const style = getComputedStyle(el);
+	const w = rect.right - rect.left, h = rect.bottom - rect.top;
+	return {
+		tl: parseRadius(style.borderTopLeftRadius,     w, h),
+		tr: parseRadius(style.borderTopRightRadius,    w, h),
+		br: parseRadius(style.borderBottomRightRadius, w, h),
+		bl: parseRadius(style.borderBottomLeftRadius,  w, h)
+	};
+}
+
+
+
+
 /// For the given data table, check that all the fields specified in options.fields
 /// have values filled in
 /// options = {

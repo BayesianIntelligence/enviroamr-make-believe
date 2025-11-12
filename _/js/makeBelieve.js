@@ -1872,7 +1872,7 @@ TextBox = class {
 	static Convert = addMixin(this, Convert);
 	static convert = {
 		toJSON: {
-			_omit: ['net','listeners','_elCached'],
+			_omit: ['net','listeners','_elCached','root'],
 		},
 		from: {
 			_extern: ['net'],
@@ -3995,7 +3995,7 @@ ${nodesStr}
 				$node.append($('<comment>').text(node.comment));
 			}
 			if (node.submodelPath) {
-				$submodel = $smile.find("> extensions > genie");
+				let $submodel = $smile.find("> extensions > genie");
 				for (var id of node.submodelPath) {
 					$submodel = $submodel.find(`> submodel#${id}`);
 				}
@@ -5487,6 +5487,8 @@ ${nodesStr}
 	}
 	/// Version for APPPLE BN paper
 	async _tempCalcEv(targetNode) {
+		/// This is for when comparing to an existing survey response
+		/// Turn it off if not using
 		let ev = {
 			General_Clinician_Training: 1,
 			Specific_Clinician_Training: 1,
@@ -5520,7 +5522,10 @@ ${nodesStr}
 
 		let bnCopy = BN.from(this.toJSON());
 		let savedEvidence = { ...bnCopy.evidence };
-		bnCopyTargetNode = bnCopy.node[targetNodeId];
+		let bnCopyTargetNode = bnCopy.node[targetNodeId];
+		bnCopy.compile();
+		await new Promise(res => bnCopy.updateBeliefs(res));
+		let baselineEv = bnCopyTargetNode.beliefs.map((p, i) => p * (bnCopyTargetNode.states[i].value ?? i)).reduce((a, v) => a + v);
 		// console.info(origEv);
 		let bevs = {};
 		for (let node of bnCopy.nodes) {
@@ -5528,8 +5533,8 @@ ${nodesStr}
 			if (node.id != targetNodeId) {
 				/// Arc cut
 				let savedCpt = node.def.cpt;
-				let distro = node.states.map((v, i) => ev[node.id] == i ? 1 : 0);
-				node.def.set(node.def.cpt.map((v, i) => distro[i % distro.length]));
+				// let distro = node.states.map((v, i) => ev[node.id] == i ? 1 : 0);
+				// node.def.set(node.def.cpt.map((v, i) => distro[i % distro.length]));
 				bnCopy.compile();
 				await new Promise(res => bnCopy.updateBeliefs(res));
 				let currentEv = bnCopyTargetNode.beliefs.map((p, i) => p * (bnCopyTargetNode.states[i].value ?? i)).reduce((a, v) => a + v);
@@ -5539,11 +5544,16 @@ ${nodesStr}
 				await new Promise(res => bnCopy.updateBeliefs(res));
 				let newEv = bnCopyTargetNode.beliefs.map((p, i) => p * (bnCopyTargetNode.states[i].value ?? i)).reduce((a, v) => a + v);
 				// console.info(newEv);
-				bevs[node.id] = { node: node.id, absBev: currentEv, deltaBev: newEv - currentEv };
+				bevs[node.id] = { node: node.id, absBev: newEv, deltaBev: newEv - currentEv };
 				node.def.set(savedCpt);
 				bnCopy.evidence = { ...savedEvidence };
 			}
 		}
+
+		bevs = {
+			table: bevs,
+			baselineEv
+		};
 
 		return bevs;
 	}

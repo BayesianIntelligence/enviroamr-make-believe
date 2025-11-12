@@ -184,8 +184,11 @@ class SubmodelContextMenu extends DisplayItemContextMenu {
 }
 
 class NodeContextMenu {
-	constructor(node) {
+	/** nodesToChange: refers to all nodes that should be modified when saving */
+	constructor(node, nodesToChange = []) {
 		this.node = node;
+		this.nodesToChange = nodesToChange;
+		this.multiChange = this.nodesToChange.length > 1;
 		/**
 			The update network is a lot more complicated than I'd like, but looks roughly like this:
 			
@@ -343,10 +346,12 @@ class NodeContextMenu {
 		);
 		
 		let tabSet = new TabSet([
-			{id: 'main', label: 'Options', content: options, active: true},
-			{id: 'states', label: 'States', content: states},
-			{id: 'definition', label: 'Definition', content: definition, onselect: definitionSelected},
-			{id: 'format', label: 'Format', content: format},
+			...(!this.multiChange ? [
+				{id: 'main', label: 'Options', content: options, active: true},
+				{id: 'states', label: 'States', content: states},
+				{id: 'definition', label: 'Definition', content: definition, onselect: definitionSelected},
+			] : []),
+			{id: 'format', label: 'Format', content: format, active: this.multiChange},
 		]).$tabs[0];
 		this.menu = n('div.contextMenu.nodeMenu.dialog',
 			tabSet,
@@ -361,7 +366,14 @@ class NodeContextMenu {
 		/// How to handle |parents|? IDs only?
 		/// |this.nodeShadow| will now have values for all these attributes. i.e. Hitting 'Save' will update
 		/// all of these attributes.
-		let msg = Object.assign(pick(this.node,'id','label','type','submodel','intervene','comment','format','displayStyle','states','stateSpace'),{defType: this.node.def.type});
+		let toSave = ['id','label','type','submodel','intervene','comment','format',
+			'displayStyle','states','stateSpace'];
+		let toSaveDefType = {defType: this.node.def.type};
+		if (this.multiChange) {
+			toSave = ['displayStyle', 'format'];
+			toSaveDefType = {};
+		}
+		let msg = Object.assign(pick(this.node,...toSave),toSaveDefType);
 		/// Create shadow copy of node first
 		let msgId = Math.random();
 		this.nodeShadow.updateObject(msg, msgId);
@@ -431,15 +443,15 @@ class NodeContextMenu {
 		/// We need to keep track of added states and deleted states.
 		///	We'll also need to track state order
 		let stateList = menuEl.querySelector('.stateList');
-		stateList.addEventListener('input', event => {
+		stateList?.addEventListener('input', event => {
 			this.updateLinkedObjects(this.gatherStatesUpdates());
 		});
-		menuEl.querySelector('button[name=addState]').addEventListener('click', event => {
+		menuEl.querySelector('button[name=addState]')?.addEventListener('click', event => {
 			let numStates = menuEl.querySelectorAll('.stateList tr').length - 1;
 			let stateId = `state${numStates}`, stateIndex = numStates;
 			this.updateObject({_addState: {id: stateId, index: stateIndex}});
 		});
-		stateList.addEventListener('click', event => {
+		stateList?.addEventListener('click', event => {
 			if (event.target.matches('.state button.delete')) {
 				if (this.nodeShadow.states.length<=1)  return;
 				let tr = event.target.closest('tr');
@@ -447,13 +459,13 @@ class NodeContextMenu {
 				this.updateObject({_removeState: {index: tr.rowIndex - 1}});
 			}
 		});
-		menuEl.querySelector('.discretized input[type=checkbox]').addEventListener('change', event => {
+		menuEl.querySelector('.discretized input[type=checkbox]')?.addEventListener('change', event => {
 			this.updateObject({stateSpace: {discretized: event.target.checked}});
 		});
-		menuEl.querySelector('.forChildrenOnly input[type=checkbox]').addEventListener('change', event => {
+		menuEl.querySelector('.forChildrenOnly input[type=checkbox]')?.addEventListener('change', event => {
 			this.updateObject({stateSpace: {forChildrenOnly: event.target.checked}});
 		});
-		menuEl.querySelector('button.guessStates').addEventListener('click', event => {
+		menuEl.querySelector('button.guessStates')?.addEventListener('click', event => {
 			
 			/// XXX To be done
 			
@@ -466,7 +478,7 @@ class NodeContextMenu {
 			/// If not, run an inference with no evidence*/
 		});
 		
-		menuEl.querySelector('.defType').addEventListener('change', event => {
+		menuEl.querySelector('.defType')?.addEventListener('change', event => {
 			console.log(event.target.value);
 			this.updateObject({defType: event.target.value});
 		});
@@ -494,7 +506,12 @@ class NodeContextMenu {
 				/// Can generate an updateId to prevent that (which I should do eventually), but it's
 				/// useful for debugging to get immediate feedback on whether the node updated properly.
 				this.nodeShadow._menuUpdate = true;
-				this.node.updateObject(this.nodeShadow);
+				if (this.multiChange) {
+					this.nodesToChange.forEach(node => node.updateObject(this.nodeShadow));
+				}
+				else {
+					this.node.updateObject(this.nodeShadow);
+				}
 				delete this.nodeShadow._menuUpdate;
 				/// Since the node is now synced:
 				/// - eliminate states changes
@@ -603,12 +620,14 @@ class NodeContextMenu {
 		}
 				
 		let menuEl = this.menu;
-		if (m.id)  menuEl.querySelector('input[name=id]').value = m.id;
-		if (m.label)  menuEl.querySelector('input[name=label]').value = m.label;
-		if (m.type)  menuEl.querySelector('select[name=type]').value = m.type;
-		if (m.submodel)  menuEl.querySelector('select[name=submodel]').value = m.submodel;
-		if (m.comment!=null)  menuEl.querySelector('textarea[name=comment]').value = m.comment;
-		if (m.intervene!=null)  menuEl.querySelector('input[name=intervene]').checked = m.intervene;
+		if (!this.multiChange) {
+			if (m.id)  menuEl.querySelector('input[name=id]').value = m.id;
+			if (m.label)  menuEl.querySelector('input[name=label]').value = m.label;
+			if (m.type)  menuEl.querySelector('select[name=type]').value = m.type;
+			if (m.submodel)  menuEl.querySelector('select[name=submodel]').value = m.submodel;
+			if (m.comment!=null)  menuEl.querySelector('textarea[name=comment]').value = m.comment;
+			if (m.intervene!=null)  menuEl.querySelector('input[name=intervene]').checked = m.intervene;
+		}
 		if (m.format) {
 			let backgroundColor = m.format.backgroundColor;
 			let borderColor = m.format.borderColor;
@@ -666,6 +685,9 @@ class NodeContextMenu {
 			}
 			testNode.remove();
 		}
+		/// XXX: For now, just short cut out everything else
+		if (this.multiChange)  return;
+
 		/** _addState/_moveState/_removeState' handle small state mutations. 'states' handles
 		    changes to all states.
 			

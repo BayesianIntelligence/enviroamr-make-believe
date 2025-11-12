@@ -1,4 +1,3 @@
-(function(exports) {
 /**
 OM = object model.
 
@@ -590,6 +589,7 @@ results - an array which will hold results
 returns: true if there's a match, false otherwise
 */
 String.prototype.matchin = function(tag, results) {
+	var m;
 	results.length = 0;
 	if ( (m = this.match(tag)) ) {
 		for (var i in m) {
@@ -706,6 +706,6 @@ Object.defineProperty(Object.prototype, '_findObjects', {value: function(criteri
 	return foundObjs;
 }});
 
-exports.Grammar = Grammar;
-exports.OBJECTVALUE = OBJECTVALUE;
-})(typeof(exports)!="undefined"?exports:window);
+var exports =  { Grammar, OBJECTVALUE };
+Object.assign(globalThis, exports);
+export default exports;

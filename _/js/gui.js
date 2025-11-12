@@ -108,7 +108,7 @@ var draw = {
 		}
 		return maxBounds;
 	},
-	getBox: function(el, viewSpace = false) {
+	getBox(el, viewSpace = false) {
 		el = $(el)[0];
 		var r;
 		// var cachedBox = null; //$(el).data('cachedBox');
@@ -142,6 +142,8 @@ var draw = {
 			//box.y = el.position().top;
 			box.x = elLeft;
 			box.y = elTop;
+			box.left += window.pageXOffset;
+			box.right += window.pageYOffset;
 			box.width *= scale;
 			box.height *= scale;
 			/// Assuming all borders have same radius
@@ -151,6 +153,7 @@ var draw = {
 			if (r > box.width/2)  r = box.width/2;
 			if (r > box.height/2)  r = box.height/2;
 			box.borderRadius = r;
+			box.radius = getRadii(el, box);
 		//}
 
 		if (!viewSpace) {
@@ -559,6 +562,10 @@ var draw = {
 		
 		return segment;
 	},
+	computeArrowBetweenBoxes(outputEl, par, child, opts = {}) {
+		let seg = getConnectionSegment(par, child);
+		return [seg.start, seg.end];
+	},
 	drawArrowBetweenBoxes(outputEl, par, child, opts = {}) {
 		outputEl = $(outputEl)[0];
 		let existingPath = outputEl.tagName.toUpperCase() == "PATH";
@@ -614,7 +621,7 @@ var draw = {
 		return table[whichHalf][q];
 	},
 	/// m,c for line (y=mx + c)
-	/// r, cx, cy for circle (r = (y-cy)**2 + (x-cx)**2)
+	/// r, cx, cy for circle (r = sqrt((y-cy)**2 + (x-cx)**2))
 	/// If line is vertical (i.e. m is infinite/undefined), pass in m=null
 	/// and c=x coordinate of vertical line.
 	/// quadrant refers to the circle quadrants
@@ -1069,6 +1076,360 @@ DisplayItem = class extends DisplayItem {
 				//this.net.displayBeliefs();
 			},
 		});
+	}
+
+	static handleMovement(bnComponent) {
+		/** Item movement **/
+		/** (and a little item selection) **/
+		var mx = 0, my = 0;
+		var disableSelect = 0;
+		/// For aligning things when moving them
+		var snapOn = true;
+		var snapGridSize = 5;
+		$(bnComponent).find('.bnouterview').on("mousedown touchstart", ".node h6, .submodel:not(.parent), .textBox", function(event) {
+			if (event.button!=0)  return;
+			if (event.target.closest('.editMode'))  return;
+			let getOffset = el => ({left: el.offsetLeft, top: el.offsetTop});
+			if (!event.originalEvent.touches)  event.preventDefault();
+			if (event.which > 1)  return;
+			mx = event.originalEvent.pageX ?? event.originalEvent.touches[0].pageX;
+			my = event.originalEvent.pageY ?? event.originalEvent.touches[0].pageX;
+			//onsole.log("mousedown:", mx, my);
+			var $item = $(this).closest(".node, .submodel, .textBox");
+			var o = getOffset($item[0]);
+			// var scale = Math.round($item[0].offsetWidth)/Math.round($item[0].getBoundingClientRect().width);
+			var scale = 1/parseFloat($('.bnview').css('zoom'));
+			disableSelect = 2;
+
+			let focusedItem = currentBn.findItem($item[0]);
+			/// Set the selection to the current item if it's outside of the current selection OR the altKey is pressed (which toggles selections)
+			if (!currentBn.selected.has(focusedItem) || event.shiftKey) {
+				currentBn.setSelection([focusedItem], {add: false, toggle: event.shiftKey});
+			}
+			var selectedOffsets = new Map();
+			var selectedGraphItems = [];
+			for (var item of currentBn.selected) {
+				if (item.displayItem) {
+					if (item.isGraphItem())  selectedGraphItems.push(item);
+					selectedOffsets.set(item, getOffset($(`#display_${item.id}`)[0]));
+				}
+			}
+
+			/// Get the width/height if the mousedown node was not part of the network
+			var maxX = 0, maxY = 0;
+			var graphItems = currentBn.getGraphItems();
+			let {internalArcs, crossingArcs} = currentBn.getSelectedArcs();
+			var hAlignItems = [];
+			var vAlignItems = [];
+			for (var i=0; i<graphItems.length; i++) {
+				var graphItem = graphItems[i];
+				if (graphItem.isHidden && graphItem.isHidden())  continue;
+				if (("display_"+graphItem.id)==$item.attr("id"))  continue;
+				var $graphItem = $("#display_"+graphItem.id);
+				var n = draw.getBox($graphItem, true);
+				maxX = Math.max(maxX, n.x+n.width);
+				maxY = Math.max(maxY, n.y+n.height);
+				if (currentBn.selected.has(graphItem))  continue;
+				if (snapOn) {
+					var $op = $graphItem.offsetParent();
+					let op = $op[0];
+					/// Prefer center alignments, to top/bottom
+					hAlignItems.push([n.y+n.height/2,n,graphItem,"center"]);
+					hAlignItems.push([n.y,n,graphItem,"top"]);
+					hAlignItems.push([n.y+n.height,n,graphItem,"bottom"]);
+					vAlignItems.push([n.x+n.width/2,n,graphItem,"center"]);
+					vAlignItems.push([n.x,n,graphItem,"left"]);
+					vAlignItems.push([n.x+n.width,n,graphItem,"right"]);
+				}
+			}
+			/// ALSO add split points that are: 1) on arcs that cross the selection boundary
+			/// and 2) only the nearest split point (since other's aren't involved in alignment)
+			for (let crossingArc of crossingArcs) {
+				let arcPathData = crossingArc.path.getPathData();
+				if (arcPathData.length <= 2)  continue;
+				let [parent,child] = crossingArc.getEndpoints();
+				let snapSplitPoint = arcPathData[1];
+				if (currentBn.selected.has(child)) {
+					snapSplitPoint = arcPathData[arcPathData.length-2];
+				}
+				
+				
+				hAlignItems.push([snapSplitPoint.values[1], null, null, "center"]);
+				vAlignItems.push([snapSplitPoint.values[0], null, null, "center"]);
+			}
+
+			var newLeft = null;
+			var newTop = null;
+			let lastDeltaX = 0;
+			let lastDeltaY = 0;
+			$(".bnouterview").on("mousemove touchmove", function(event) {
+				event.preventDefault();
+				$(".hAlignLine").hide();
+				$(".vAlignLine").hide();
+				$(".aligning").removeClass("aligning");
+				var nmx = event.originalEvent.pageX ?? event.originalEvent.touches[0].pageX;
+				var nmy = event.originalEvent.pageY ?? event.originalEvent.touches[0].pageY;
+				//onsole.log("mousemove:", nmx, nmy, {left: o.left + (nmx - mx), top: o.top + (nmy - my)});
+				/// Move the DOM object, but not the net object yet
+				newLeft = o.left + (nmx - mx)*scale;
+				newTop = o.top + (nmy - my)*scale;
+				// console.log(newLeft, nmx, mx, (nmx-mx), scale);
+				if (snapOn) {
+					/// XXX I Should refactor to make this slimmer/more code reuse
+					/// Find something to align with if possible
+					for (var i=0; i<hAlignItems.length; i++) {
+						var otherItem = hAlignItems[i];
+						var halfHeight = $item.outerHeight()/2;
+						if (otherItem[3]=="center" && Math.floor(otherItem[0]/snapGridSize)==Math.floor((newTop+halfHeight)/snapGridSize)) {
+							newTop = otherItem[0]-halfHeight;
+							if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
+							if (!$(".hAlignLine").length)  $("<div class=hAlignLine>").appendTo(".bnview");
+							$(".hAlignLine").show()[0].style.top = (newTop+halfHeight)+'px';
+							break;
+						}
+						else if (Math.floor(otherItem[0]/snapGridSize)==Math.floor(newTop/snapGridSize)) {
+							newTop = otherItem[0];
+							if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
+							if (!$(".hAlignLine").length)  $("<div class=hAlignLine>").appendTo(".bnview");
+							$(".hAlignLine").show()[0].style.top = (newTop)+'px';
+							break;
+						}
+						else if (Math.floor(otherItem[0]/snapGridSize)==Math.floor((newTop+$item.outerHeight())/snapGridSize)) {
+							newTop = otherItem[0]-$item.outerHeight();
+							if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
+							if (!$(".hAlignLine").length)  $("<div class=hAlignLine>").appendTo(".bnview");
+							$(".hAlignLine").show()[0].style.top = (newTop+$item.outerHeight())+'px';
+							break;
+						}
+					}
+					/// Find something to align with if possible
+					for (var i=0; i<vAlignItems.length; i++) {
+						var otherItem = vAlignItems[i];
+						var halfWidth = $item.outerWidth()/2;
+						/*console.log(otherItem[3], Math.floor(otherItem[0]/snapGridSize), "snaps",
+							Math.floor((newLeft+halfWidth)/snapGridSize),
+							Math.floor(newLeft/snapGridSize),
+							Math.floor((newLeft+$item.outerWidth())/snapGridSize),
+						);*/
+						if (otherItem[3]=="center" && Math.floor(otherItem[0]/snapGridSize)==Math.floor((newLeft+halfWidth)/snapGridSize)) {
+							newLeft = otherItem[0]-halfWidth;
+							if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
+							if (!$(".vAlignLine").length)  $("<div class=vAlignLine>").appendTo(".bnview");
+							$(".vAlignLine").show()[0].style.left = (newLeft+halfWidth)+'px';
+							break;
+						}
+						else if (Math.floor(otherItem[0]/snapGridSize)==Math.floor(newLeft/snapGridSize)) {
+							newLeft = otherItem[0];
+							if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
+							if (!$(".vAlignLine").length)  $("<div class=vAlignLine>").appendTo(".bnview");
+							$(".vAlignLine").show()[0].style.left = (newLeft)+'px';
+							break;
+						}
+						else if (Math.floor(otherItem[0]/snapGridSize)==Math.floor((newLeft+$item.outerWidth())/snapGridSize)) {
+							newLeft = otherItem[0]-$item.outerWidth();
+							if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
+							if (!$(".vAlignLine").length)  $("<div class=vAlignLine>").appendTo(".bnview");
+							$(".vAlignLine").show()[0].style.left = (newLeft+$item.outerWidth())+'px';
+							break;
+						}
+					}
+				}
+				/// Scale can muck up the alignment lines (sure, these probably shouldn't
+				/// be in the div that gets scaled)
+				
+				// $('.hAlignLine').css('width', (scale*100)+'%');
+				// $('.vAlignLine').css('height', (scale*100)+'%');
+				$item[0].style.left = (newLeft)+'px';
+				$item[0].style.top = (newTop)+'px';
+				//$item.offset({left: newLeft, top: newTop});
+				let deltaX = newLeft - o.left;
+				let deltaY = newTop - o.top;
+				var curMaxX = maxX, curMaxY = maxY;
+				for (var selItem of currentBn.selected) {
+					if (selItem.displayItem) {
+						var $selItem = $(`#display_${selItem.id}`);
+						if (!$selItem.is($item)) {
+							var sItem = selectedOffsets.get(selItem);
+							$selItem[0].style.left = ( sItem.left + deltaX )+'px';
+							$selItem[0].style.top = ( sItem.top + deltaY )+'px';
+						}
+					}
+				}
+				let moveDeltaX = deltaX - lastDeltaX;
+				let moveDeltaY = deltaY - lastDeltaY;
+				//onsole.log(moveDeltaX, moveDeltaY);
+				var {maxX: curMaxX, maxY: curMaxY} = currentBn.redrawArcs(selectedGraphItems, curMaxX, curMaxY, {moved: {deltaX: moveDeltaX, deltaY: moveDeltaY}});
+				lastDeltaX = deltaX;
+				lastDeltaY = deltaY;
+				//for (var key in
+				var n = currentBn.getGraphItemById($item.attr("id").replace(/^display_/,""));
+				/// What's being moved is now always selected, so following not needed
+				//if (n.pathsIn)  currentBn.redrawArcs(n, curMaxX, curMaxY);
+				disableSelect = 3;
+			});
+			$(".bnouterview").on("mouseup touchend", function(event) {
+				$(".hAlignLine").hide();
+				$(".vAlignLine").hide();
+				$(".aligning").removeClass("aligning");
+				/// Update position of the node
+				if (newLeft !== null) {
+					var nmx = event.originalEvent.pageX ?? event.originalEvent.changedTouches[0].pageX;
+					var nmy = event.originalEvent.pageY ?? event.originalEvent.changedTouches[0].pageX;
+					//onsole.log("mouseup:", nmx, nmy, {left: o.left + (nmx - mx), top: o.top + (nmy - my)});
+					//$item.offset({left: newLeft, top: newTop});
+
+					/// Now it's final, update the net object
+					var n = currentBn.getGraphItemById($item.attr("id").replace(/^display_/,""));
+					var bn = n.net
+					var dLeft = newLeft - o.left;
+					var dTop = newTop - o.top;
+					
+					
+					var els = document.elementsFromPoint(event.clientX ?? event.changedTouches[0].clientX, event.clientY ?? event.changedTouches[0].clientY);
+					var submodel = els.find(el => el.matches('.submodel') && $(el).data('submodel').id != n.id);
+					submodel = $(submodel).data('submodel');
+					if (submodel) {
+						var n = submodel.net.getGraphItemById($item.attr("id").replace(/^display_/,""));
+						let net = submodel.net;
+						net.changes.doCombined(_=>{
+							n.guiMoveToSubmodel( submodel );
+							for (var item of currentBn.selected) {
+								//onsole.log(node.id, submodel.id);
+								item.guiMoveToSubmodel( submodel );
+								//Not sure what the following was supposed to do
+								//selectedOffsets[node]
+							}
+						});
+						net.guiUpdateAndDisplayForLast();
+						net.clearSelection();
+					}
+					else {
+						var oldPos = {x: n.pos.x, y: n.pos.y};
+						var newPos = {x: n.pos.x+dLeft, y: n.pos.y+dTop};
+						/// Make array
+						var items = [...currentBn.selected].filter(node => node.id != n.id);
+						var itemPos = items.map(item => Object.assign({}, item.pos));
+						var newItemPos = itemPos.map(pos => ({x: pos.x+dLeft, y: pos.y+dTop}));
+						
+						bn.changes.doCombined(_=> {
+							n.moveTo(newPos.x, newPos.y);
+							items.forEach((item,i) => {
+								item.moveTo(newItemPos[i].x, newItemPos[i].y);
+							});
+						});
+					}
+
+				}
+				$(".bnouterview").unbind("mousemove touchmove").unbind("mouseup touchend");
+				
+
+				disableSelect -= 1;
+			});
+		});
+		
+		/// Move by keyboard
+		let keyMoveKeyup = null;
+		let savedItemPos = null;
+		document.addEventListener('keydown', event => {
+			console.log('x');
+			if (currentBn.selected.size && !event.target.matches('textarea, input, select, [contenteditable]')
+					&& ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)) {
+				if (!keyMoveKeyup) {
+					/// Save all item positions on first key down
+					savedItemPos = [...currentBn.selected].map(item => [item,Object.assign({},item.pos)]);
+					document.addEventListener('keyup', keyMoveKeyup = event => {
+						/// Collect new positions
+						newItemPos = [...currentBn.selected].map(item => [item,Object.assign({},item.pos)]);
+						/// Restore item positions before setting them undoably
+						savedItemPos.forEach(([item,pos]) => Object.assign(item.pos, pos));
+						currentBn.changes.doCombined(_=> {
+							/// Set undoably
+							newItemPos.forEach(([item,pos]) => item.moveTo(pos.x, pos.y));
+						});
+						if (currentBn.changes.lastAction()?.type == 'ItemMove') {
+							/// Coalesce all ItemMoves (not particularly efficiently)
+							currentBn.changes.linkToPrevious();
+						}
+						document.removeEventListener('keyup', keyMoveKeyup);
+						keyMoveKeyup = null;
+					});
+				}
+				for (let item of currentBn.selected) {
+					let dx = 0, dy = 0;
+					if      (event.key == 'ArrowRight')  dx = 10;
+					else if (event.key == 'ArrowLeft')  dx = -10;
+					else if (event.key == 'ArrowUp')  dy = -10;
+					else if (event.key == 'ArrowDown')  dy = 10;
+					if (event.ctrlKey) { dx*=3; dy*=3; }
+					if (event.shiftKey) { dx*=0.2; dy*=0.2; }
+					item.moveTo(item.pos.x+dx, item.pos.y+dy, false);
+				}
+			}
+		});
+	}
+
+	static handleSelection(bnComponent) {
+		/** Select multiple objects (currently only includes nodes) **/
+		$(bnComponent).find(".bnmidview").on('mousedown', function(event) {
+			if (event.button!=0)  return;
+			if (!$(event.target).closest('.item').length) {
+				if (!event.shiftKey && !event.altKey && event.button==0 && !event.target.closest('.menu'))  currentBn.clearSelection();
+				var turnOn = !event.altKey ? true : false;
+				var view = $('.bnmidview').offset();
+				var {pageX: origX, pageY: origY} = event;
+				var $rectSelect = $('<div class=rectSelect>')
+					.css({top: origY - view.top, left: origX - view.left, display: 'none'})
+					.appendTo('.bnmidview');
+				event.preventDefault();
+				$(window).on('mousemove.rectSelect', function(event) {
+					var {pageX: curX, pageY: curY} = event;
+					$rectSelect.css({
+						top: (curY < origY ? curY : origY) - view.top, left: (curX < origX ? curX : origX) - view.left,
+						width: Math.abs(curX - origX), height: Math.abs(curY - origY), display: 'block'});
+				}).on('mouseup.rectSelect', function(event) {
+					/// Which items are contained in the rectangle?
+					//var rect = Object.assign($rectSelect.offset(), {width: $rectSelect.width(), height: $rectSelect.height()});
+					var rect = $rectSelect[0].getBoundingClientRect();
+					$('.bnview .item').each(function() {
+						//var item = Object.assign($(this).offset(), {width: $(this).width(), height: $(this).height()});
+						var item = this.getBoundingClientRect();
+						//onsole.log(item, rect);
+						if (rect.top <= item.top && item.top+item.height <= rect.top+rect.height
+								&&
+								rect.left <= item.left && item.left+item.width <= rect.left+rect.width) {
+							console.log('hit');
+							currentBn.findItem(this).guiToggleSelect({on:turnOn});
+						}
+					});
+					$(window).off('.rectSelect');
+					/// This interferes with other double-click events in Chrome if it's not executed
+					/// outside the current event loop.
+					setTimeout(_=> $rectSelect.remove(), 0);
+				});
+			}
+		});
+	}
+
+	static handleDelete(bnComponent) {
+		$(bnComponent).on('keydown', function(event) {
+			var $t = $(event.target);
+			if (!$t.closest('.node, .submodel, .text, input, select, textarea, [contenteditable]').length) {
+				if (event.key == "Delete") {
+					currentBn.changes.startCombined();
+					for (var item of currentBn.selected) {
+						item.guiDelete();
+						currentBn.selected.delete(item);
+					}
+					currentBn.changes.endCombined();
+					currentBn.guiUpdateAndDisplayForLast();
+				}
+			}
+		});
+	}
+
+	static handleEvents(bnComponent) {
+		this.handleMovement(bnComponent);
+		this.handleSelection(bnComponent);
 	}
 }
 // copyProperties(DisplayItem.prototype, GuiDisplayItem.prototype);
@@ -1667,6 +2028,7 @@ BN = class extends BN {
 		if (!outputEl)  outputEl = this.outputEl = $('.bnview');
 		if (items) {
 			for (let item of items) {
+				if (item.mgr?.root) { item.mgr.root.remove(); continue; }
 				if (item.el())  item.el().remove();
 			}
 		}
@@ -1773,9 +2135,9 @@ BN = class extends BN {
 		/// Draw the text objects
 		/// XXX todo
 		for (let item of bn.basicItems) {
-			if (item.isHidden() || !items.includes(item)) continue;
+			if (item.mgr.isHidden() || !items.includes(item)) continue;
 
-			item.displayItem(outputEl);
+			item.mgr.displayItem(outputEl);
 		}
 
 		this.updateArcs(graphItems, outputEl);
@@ -1939,10 +2301,11 @@ BN = class extends BN {
 		this._trackingArcInfluences = false;
 	}
 
-	displayArcsWithInfluences() {
+	displayArcsWithInfluences(forcedMis = null) {
 		var sumMis = {};
 		var sumChildEntropies = {};
 		let widthRange = 30;
+		let opacityWidthThreshold = 1;
 		let minWidth = 0.2;
 		for (var i=0; i<this.nodes.length; i++) {
 			var node = this.nodes[i];
@@ -1951,29 +2314,41 @@ BN = class extends BN {
 				var child = node.children[j];
 				if (child.engineOnly)  continue;
 
-				/// The very objects themselves should be the same, but test by id anyway,
-				/// in case some transformation happens (in a future version).
-				var miNode = node.children.find(
-					v => v.id.search(/^__mutualInfo_/)!=-1
-					&& v.parents[0].id==node.id
-					&& v.parents[1].id==child.id
-				);
-				console.log(miNode);
-				var childEntropy = 0;
-				for (var k=0; k<child.states.length; k++) {
-					childEntropy += -(child.beliefs[k] * Math.log2(child.beliefs[k]));
+				let mi = 0;
+				let childEntropy = 0;
+				let entropyProportion = null;
+				if (forcedMis) {
+					let maxMi = Math.max(...forcedMis.map(f => f.strength));
+					let minMi = Math.min(...forcedMis.map(f => f.strength));
+					let forcedMi = forcedMis.find(f => f.from == node.id && f.to == child.id);
+					console.debug(forcedMi, node.id, child.id);
+					entropyProportion = (forcedMi.strength-minMi)/(maxMi-minMi);
 				}
-				var mi = 0;
-				for (var k=0; k<miNode.states.length; k++) {
-					var Pxy = miNode.beliefs[k];
-					var Px = node.beliefs[Math.floor(k/child.states.length)];
-					var Py = child.beliefs[k % child.states.length];
-					console.log(Pxy, Px, Py);
+				else {
+					/// The very objects themselves should be the same, but test by id anyway,
+					/// in case some transformation happens (in a future version).
+					var miNode = node.children.find(
+						v => v.id.search(/^__mutualInfo_/)!=-1
+						&& v.parents[0].id==node.id
+						&& v.parents[1].id==child.id
+					);
+					console.log(miNode);
+					childEntropy = 0;
+					for (var k=0; k<child.states.length; k++) {
+						childEntropy += -(child.beliefs[k] * Math.log2(child.beliefs[k]));
+					}
+					mi = 0;
+					for (var k=0; k<miNode.states.length; k++) {
+						var Pxy = miNode.beliefs[k];
+						var Px = node.beliefs[Math.floor(k/child.states.length)];
+						var Py = child.beliefs[k % child.states.length];
+						console.log(Pxy, Px, Py);
 
-					if (Pxy==0 || Px==0 || Py==0)  continue;
+						if (Pxy==0 || Px==0 || Py==0)  continue;
 
-					var pMi = Pxy * Math.log2(Pxy/(Px*Py));
-					mi += pMi;
+						var pMi = Pxy * Math.log2(Pxy/(Px*Py));
+						mi += pMi;
+					}
 				}
 				console.log("MI:", mi, "Entropy of child:", childEntropy);
 
@@ -1998,14 +2373,21 @@ BN = class extends BN {
 						sumChildEntropies[arc.arcId] = 0;
 					}
 					/// Update arc width based on MI influence
-					var entropyProportion = 0;
+					entropyProportion = entropyProportion ?? 0;
 					sumMis[arc.arcId] += mi;
 					sumChildEntropies[arc.arcId] += childEntropy;
 					if (sumChildEntropies[arc.arcId] > 0) {
 						entropyProportion = sumMis[arc.arcId]/sumChildEntropies[arc.arcId];
 					}
 					console.log("stroke", (entropyProportion*widthRange)+"px");
-					arc.path.style.strokeWidth = Math.max(minWidth, (entropyProportion*widthRange))+"px";
+					let width = (entropyProportion*widthRange);
+					if (width > opacityWidthThreshold) {
+						arc.path.style.strokeWidth = width + 'px';
+					}
+					else {
+						arc.path.style.strokeWidth = '1px';
+						arc.path.style.opacity = Math.max(minWidth, width);
+					}
 				}
 			}
 		}
@@ -2371,6 +2753,81 @@ BN = class extends BN {
 		}
 		return gen;
 	}
+
+	static handleEvents(bnComponent) {
+		/** Move current canvas around **/
+		makeDraggable(q(bnComponent, '.bnmidview'));
+
+		/// Double click selections cause all sorts of grief :(
+		/// This cancels them for non-editable elements
+		document.addEventListener('mousedown', function (event) {
+			if ($(event.target).is('input,select,textarea,[contenteditable]'))  return;
+			if (event.detail > 1) {
+				event.preventDefault();
+			}
+		}, false);
+		$(bnComponent).find(".bnview").on("dblclick", function(event) {
+			/// Only trigger in blank areas
+			if (!$(event.target).is(".bnview") && !$(event.target).is(".netSvgCanvas"))  return;
+			/*
+			var i = 0;
+			while (currentBn.nodesById["node"+i]) i++;
+			if ($(event.target).is(".bnview") || $(event.target).is(".netSvgCanvas")) {
+				var node = currentBn.addNode("node"+i, ["state0","state1"], {cpt:[.5,.5], pos: {x: event.offsetX, y: event.offsetY}, addToCanvas: true});
+				$('#display_'+node.id+' h6').map(lightNodeEdit);
+			}
+			event.preventDefault();
+			return false;*/
+			var target = event.target;
+			var offsetX = event.offsetX;
+			var offsetY = event.offsetY;
+			var menu = Menu({
+				type: 'contextMenu',
+				label: 'Make',
+				items: [
+					MenuAction('Node', () => {
+						if ($(target).is(".bnview") || $(target).is(".netSvgCanvas")) {
+							let i = 0;
+							while (currentBn.nodesById["node"+i]) i++;
+							let node = currentBn.guiAddNode('node'+i, null, {cpt:[.5,.5], pos: {x: offsetX, y: offsetY}, submodelPath: currentBn.currentSubmodel});
+							currentBn.guiUpdateAndDisplayForLast(null, _=> $('#display_'+node.id+' h6').map(function() { currentBn.findItem(this).lightNodeEdit()}));
+						}
+						menu.dismiss();
+						return false;
+					}),
+					MenuAction('Submodel', () => {
+						currentBn.guiAddSubmodel(null, {pos: {x: offsetX, y: offsetY}, addToCanvas: true});
+						menu.dismiss();
+						return false;
+					}),
+					MenuAction('Text Box', () => {
+						var textBox = currentBn.guiAddTextBox('[Insert text]', {pos: {x: offsetX, y: offsetY}});
+						textBox.guiEdit({combine: true});
+						//$('#display_'+textBox.id).trigger('dblclick');
+						menu.dismiss();
+						return false;
+					}),
+				],
+			});
+			menu.popup({left: event.clientX, top: event.clientY - 15});
+			event.preventDefault();
+			return false;
+		});
+
+		q('.bnouterview').listeners.add("contextmenu", event => {
+			let displayItem = event.target.closest(".node, .submodel, .textBox");
+			if (displayItem) {
+				if (event.shiftKey)  return true;
+				if (event.ctrlKey || event.target.closest('.submodel')) {
+					var $displayItem = $(displayItem);
+					var item = currentBn.getItemById($displayItem.attr("id").replace(/^display_/, ''));
+					item.contextMenu(event);
+					event.preventDefault();
+					return false;
+				}
+			}
+		});
+	}
 }
 /*var apiBN = BN;
 BN = function(...args) {
@@ -2617,44 +3074,51 @@ Submodel = class extends Submodel {
 		let nodes = this.getAllNodes();
 		return [...new Set(nodes.map(n1 => n1.getDescendants({stopAfter: n=>n!=n1 && n.getVisibleItem()})).flat().map(n=>n.getVisibleItem()))].filter(p => p!=this);
 	}
-}
 
-function addManager() { return null; }
-function addViews() { return null;}
+	static handleEvents(bnComponent) {
+		/// Submodel navigation
+		$(bnComponent).find(".bnview").on("dblclick", ".submodel", function() {
+			let submodelToView = $(this).data("submodel").submodelPath.concat($(this).data("submodel").id ? [$(this).data("submodel").id] : []);
+			currentBn.guiOpenSubmodel(submodelToView);
+			currentBn.clearSelection();
+			return false;
+		});
+	}
+}
 
 Node = class extends Node {
 	static DisplayItem = addMixin(this, DisplayItem);
-	mgr = addManager(this, class {
-		addParents(parents) {
-			let node = this.model;
-			this.changes().addAndDo({
-				parents: parents.slice(),
-				net: this.net, node,
-				name: "Add Parents",
-				redo() {
-					this.node.addParents(this.parents);
-					this.node.views.addParents(this.parents);
-					this.net.views.structureChanged();
-				},
-				undo() {
-					this.node.removeParents(this.parents);
-					this.node.views.removeParents(this.parents);
-					this.net.views.structureChanged();
-				},
-			});
-		}
-	});
-	views = addViews(this, class {
-		make() {
-			this.root = n('div.node');
-		}
-		addParents(parents) {
-			this.model.net.views.updateArcs(this.model.getVisibleItem());
-		}
-		removeParents(parents) {
-			this.addParents(parents);
-		}
-	});
+	// mgr = addManager(this, class {
+	// 	addParents(parents) {
+	// 		let node = this.model;
+	// 		this.changes().addAndDo({
+	// 			parents: parents.slice(),
+	// 			net: this.net, node,
+	// 			name: "Add Parents",
+	// 			redo() {
+	// 				this.node.addParents(this.parents);
+	// 				this.node.views.addParents(this.parents);
+	// 				this.net.views.structureChanged();
+	// 			},
+	// 			undo() {
+	// 				this.node.removeParents(this.parents);
+	// 				this.node.views.removeParents(this.parents);
+	// 				this.net.views.structureChanged();
+	// 			},
+	// 		});
+	// 	}
+	// });
+	// views = addViews(this, class {
+	// 	make() {
+	// 		this.root = n('div.node');
+	// 	}
+	// 	addParents(parents) {
+	// 		this.model.net.views.updateArcs(this.model.getVisibleItem());
+	// 	}
+	// 	removeParents(parents) {
+	// 		this.addParents(parents);
+	// 	}
+	// });
 	updateObject(o, updateId = null) {
 		/*let old = {};
 		for (let [key,value] of Object.entries(o)) {
@@ -2714,7 +3178,10 @@ Node = class extends Node {
 			}
 			/// The element should really have it's own object link/manager, but I'm
 			/// just doing it from here for now
-			this._elCached.find('h6').text(this.net.headerFormat(this.id, this.label));
+			let h6Text = this.net.headerFormat(this.id, this.label);
+			this._elCached.find('h6')
+				.text(h6Text)
+				.css('--balanced-width', getBalancedWidth(this._elCached.find('h6')[0])+'px');
 			this._elCached.attr('id', 'display_'+this.id);
 		}
 		this._elCached[0].classList[o.intervene ? 'add' : 'remove']('intervene');
@@ -2811,12 +3278,13 @@ Node = class extends Node {
 		var node = this;
 		
 		if (!$displayNode) {
+			let h6Text = node.net.headerFormat(node.id, node.label);
 			$displayNode = $("<div class='node item' id=display_"+node.id+">")
 				.css({left: node.pos.x, top: node.pos.y})
 				.append(
 					$('<div class="inner">').append(
 						$('<div class=controlBar>').append(
-							$("<h6>").text(node.net.headerFormat(node.id, node.label)),
+							$("<h6>").text(h6Text),
 							$(`<div class=hotSpotParent>
 								<div class=hotSpotReverse></div>
 								<div class=hotSpot></div>
@@ -2834,6 +3302,7 @@ Node = class extends Node {
 			if (node.format.fontColor)  $displayNode.css('--node-text', node.format.fontColor);
 			if (node.format.fontFamily)  $displayNode.css('--node-font-family', node.format.fontFamily);
 			if (node.format.fontSize)  $displayNode.css('--node-font-size', draw.ptToView(node.format.fontSize));
+			$displayNode.find('h6').css('--balanced-width', getBalancedWidth($displayNode.find('h6')[0])+'px');
 			removeMatchingClasses($displayNode[0], c => c.startsWith('ds_'));
 			$displayNode.attr('data-display-style', null);
 			if (node.format.displayStyle) {
@@ -3277,7 +3746,8 @@ Node = class extends Node {
 		/// Changes in the box must propagate to the net only after clicking 'Save'
 		/// Dialogs are non-modal, can be moved around, resized (and are potentially dockable)
 		console.log('menu');
-		let menu = new NodeContextMenu(this);
+		/// XXX: Should this just filter selected items to nodes, or all graph items ok?
+		let menu = new NodeContextMenu(this, [...this.net.selected].filter(el => el.isGraphItem()));
 		menu.popup({left: event.clientX, top: event.clientY});
 		return menu;
 	}
@@ -3740,14 +4210,90 @@ Node = class extends Node {
 		}
 		lightNodeEdit();
 	}
+	
+	static handleEvidence(bnComponent) {
+		/** Evidence **/
+		$(bnComponent).on("mousedown", ".stateName, .beliefBar", function(event) {
+			if (event.originalEvent && event.originalEvent.button != 0)  return;
+			var nodeId = $(this).closest(".node").attr("id").replace(/^display_/, '');
+			var node = currentBn.nodesById[nodeId];
+			var stateI = node.statesById[$(this).closest('.state').find('.stateName').text()].index;
+			if (node.dynamic) {
+				var checks = "";
+				var selectStr = "<select>";
+				selectStr += "<option value=-1>(not set)</option>";
+				for (var i=0; i<node.states.length; i++) {
+					selectStr += "<option value="+i+">"+node.states[i].id+"</option>";
+				}
+				selectStr += "</select>";
+				for (var i=0; i<10; i++) {
+					checks += "<div class='timestep time"+i+"'>"+selectStr+"</div>";
+				}
+				dialog.popup("Please specify the evidence for each time slice:"
+					+checks
+					+"<div class=controls><button type=button class='okButton'>OK</button></div>");
+				var t = 0;
+				$(".dialog .timestep").each(function() {
+					var e = currentBn.evidence[nodeId+(t==0?"":"_"+t)];
+					if (e !== undefined)  $(this).find("select").val( e );
+					t++;
+				});
+				$(".dialog .okButton").one("click", function() {
+					var t = 0;
+					$(".dialog").find(".timestep").each(function() {
+						var timeStepVal = $(this).find("select").val();
+						console.log(timeStepVal, $(this).find("select").text());
+
+						if (timeStepVal == -1) {
+							delete currentBn.evidence[nodeId+(t==0?"":"_"+t)];
+						}
+						else {
+							currentBn.evidence[nodeId+(t==0?"":"_"+t)] = Number(timeStepVal);
+						}
+						t++;
+					});
+					dialog.dismissAll();
+					currentBn.updateAndDisplayBeliefs();
+				});
+			}
+			else {
+				if (typeof(currentBn.evidence[nodeId])!="undefined") {
+					/// Remove the evidence
+					var isNewState = currentBn.evidence[nodeId] != stateI;
+					delete currentBn.evidence[nodeId];
+					/// Set new evidence
+					if (isNewState) {
+						currentBn.evidence[nodeId] = stateI;
+					}
+					/// Remove visual indicator of evidence if no new evidence
+					else {
+						$("#display_"+nodeId).removeClass("hasEvidence");
+					}
+				}
+				else {
+					/// Save the evidence
+					currentBn.evidence[nodeId] = stateI;
+
+					/// Update display
+					$("#display_"+nodeId).addClass("hasEvidence");
+				}
+				app.updateBN();
+			}
+			currentBn.notifyEvidenceChanged();
+		});
+	}
 
 	static handleEvents(bnComponent) {
+		this.handleEvidence(bnComponent);
+
 		$(bnComponent).on('contextmenu', '.node.item', event => {
 			let bn = $(bnComponent).data('bn');
 			if (!event.ctrlKey) {
 				let item = bn.getItem(event.currentTarget);
-				bn.clearSelection();
-				item.guiToggleSelect(true);
+				if (!bn.selected.has(item)) {
+					bn.clearSelection();
+					item.guiToggleSelect(true);
+				}
 				//event.stopImmediatePropagation();
 				event.preventDefault();
 				item.contextMenu(event);
@@ -3766,29 +4312,84 @@ Node = class extends Node {
 	}
 }
 
-TextBox = class extends TextBox {
-	static DisplayItem = addMixin(this, DisplayItem);
-	constructor(...args) {
-		super(...args);
+// function addManager(modelClass, managerClass) {
+// 	function OverrideConstructor(...args) {
+// 		let instance = new modelClass(...args);
+// 		instance.mgr = new managerClass;
+// 		return instance;
+// 	}
+// 	OverrideConstructor.prototype = modelClass.prototype;
+// 	Object.setPrototypeOf(OverrideConstructor, modelClass);
+// 	/*// We override the init function dynamically
+// 	let prevInit = modelClass.prototype.init;
+// 	modelClass.prototype.init = function(...args) {
+// 		prevInit.apply(this, args);
+// 		this.mgr = new managerClass;
+// 	}*/
+// 	return OverrideConstructor;
+// }
+
+function addManagerPassthrough(mgr, passthroughObj) {
+	return new Proxy(mgr, {
+		get(target, prop) {
+			if (!(prop in target)) {
+				if (prop in passthroughObj) {
+					return passthroughObj[prop];
+				}
+			}
+			return target[prop];
+		},
+		set(target, prop, value) {
+			if (!(prop in target)) {
+				if (prop in passthroughObj) {
+					mgr.update({[prop]: value});
+					// return passthroughObj[prop] = value;
+					return value;
+				}
+			}
+			target[prop] = value;
+			return value;
+		},
+	});
+}
+
+function addManager(modelClass, managerClass) {
+	Object.defineProperty(modelClass.prototype, 'mgr', {
+		get() {
+			let manager = addManagerPassthrough(new managerClass({model: this}), this);
+			Object.defineProperty(this, 'mgr', {
+				value: manager
+			});
+			return manager;
+		}
+	});
+	return modelClass;
+}
+
+
+class TextBoxManager {
+	constructor({model}) {
+		this.model = model;
 		this.listeners = new Listeners();
-		this.listeners.add('update', msg=>this.refreshView(msg));
+		this.listeners.add('view', msg=>this.updateView(msg));
 	}
+
 	update(m, o = {}) {
 		o.withPrevious ??= false;
-		this.net.changes.addAndDo({
-			old: copyTo(this, copyTo(m,{}), {existingOnly:true}),
+		this.model.net.changes.addAndDo({
+			old: copyTo(this.model, copyTo(m,{}), {existingOnly:true}),
 			new: m,
 			withPrevious: o.withPrevious,
 			exec: cur => {
-				copyTo(cur, this);
-				this.listeners.notify('update', cur);
+				copyTo(cur, this.model);
+				this.listeners.notify('view', cur);
 			}
 		});
 	}
-	
-	refreshView(m) {
-		console.log('TextBox.refreshView');
-		let el = q(this.el());
+
+	updateView(m) {
+		console.log('TextBox.updateView');
+		let el = q(this.root);
 		let elInner = el.q('.inner');
 		if (m.text!=null) {
 			elInner.innerTextTEMPFIX = m.text;
@@ -3799,8 +4400,14 @@ TextBox = class extends TextBox {
 		if (m.size?.height!==undefined) {
 			el.style.height = m.size.height ? m.size.height+'px' : '';
 		}
+		if (m.pos?.x!==undefined) {
+			el.style.left = m.pos.x ? m.pos.x+'px' : '';
+		}
+		if (m.pos?.y!==undefined) {
+			el.style.top = m.pos.y ? m.pos.y+'px' : '';
+		}
 		if (m.id!=null) {
-			el.id = 'display_'+this.id;
+			el.id = 'display_'+this.model.id;
 		}
 		if (m.format!=null) {
 			elInner.style.set({
@@ -3817,61 +4424,55 @@ TextBox = class extends TextBox {
 		}
 	}
 	
-	/// Like make()
-	displayItem(outputEl, $displayNode, force = false) {
-		if (this.isHidden() && !force)  return null;
-		if (!outputEl && this.net)  outputEl = this.net.outputEl;
-		var textBox = this;
-		if (!$displayNode) {
-			$displayNode = $("<div class='textBox item' id=display_"+textBox.id+">")
-				.css({left: textBox.pos.x, top: textBox.pos.y})
-				.css({
-					width: textBox.size.width==-1 ? null : textBox.size.width,
-					height: textBox.size.height==-1 ? null : textBox.size.height
-				})
-				.appendTo(outputEl)
-				.append($('<div class=inner>'));
-			this._elCached = $displayNode;
-			this.refreshView(this);
-		}
-		if (textBox.type)  $displayNode.addClass(textBox.type);
+	make() {
+		this.root = n(`div.textBox.item#display_${this.model.id}`,
+			n('div.inner'),
+		);
+		this.root.mgr = this;
+	}
 
+	displayItem(outputEl, $displayNode, force = false) {
+		if (this.model.isHidden() && !force)  return null;
+		if (!outputEl && this.model.net)  outputEl = this.model.net.outputEl;
+		var textBox = this.model;
+		if (!$displayNode) {
+			this.make();
+			this.updateView(this);
+			outputEl.append(this.root);
+			$displayNode = $(this.root);
+		}
 		return $displayNode;
 	}
 
-	guiAddToNet(net) {
-		let textBox = this;
+	addToNet(net) {
+		let textBox = this.model;
 		net.changes.addAndDo({
-			textBox: this,
+			textBox,
 			net: net,
 			redo() {
-				this.textBox.addToNet(net);
+				this.textBox.addToNet(this.net);
 				this.textBox.displayItem(this.net.outputEl);
 			},
 			undo() {
 				this.textBox.delete();
-				textBox.el().remove();
+				this.textBox.el().remove();
 			},
 		});
-		return this;
 	}
 
-	guiDelete(o = {}) {
-		o = {
-			prompt: false,
-			...o
-		};
+	delete({prompt=false} = {}) {
+		let textBox = this.model;
 
 		let doDelete = _=> {
-			this.net.changes.addAndDo({
-				net: this.net,
-				textBox: this,
+			textBox.net.changes.addAndDo({
+				net: textBox.net,
+				textBox,
 				redo() {
 					/// Remove gui components
 					this.textBox.el().remove();
 					
 					/// Remove from selection if there
-					this.textBox.net.selected.delete(this);
+					this.net.selected.delete(this);
 					
 					/// Delete base object
 					this.textBox.delete();
@@ -3883,10 +4484,10 @@ TextBox = class extends TextBox {
 			});
 		};
 
-		if (o.prompt) {
+		if (prompt) {
 			dialog.popup($('<div>Are you sure?</div>'), {buttons: [
 				$('<button type=button>').html('Delete').on('click', () => {
-					let net = this.net;
+					let net = textBox.net;
 					doDelete();
 					dialog.dismissAll();
 				}),
@@ -3898,12 +4499,10 @@ TextBox = class extends TextBox {
 		}		
 	}
 
-	guiEdit(o = {}) {
-		o.combine ??= false;
-		
-		let te = this;
+	edit({combine=false} = {}) {
+		let textBox = this.model;
 		let closeOut = _=> {
-			let el = q(this.el());
+			let el = q(this.root);
 			let newHeight = el.scrollHeight;
 			el
 				.removeAttribute('contenteditable')
@@ -3913,10 +4512,10 @@ TextBox = class extends TextBox {
 
 			evts.remove();
 
-			te.update({text:newText, size:{height:newHeight}}, {withPrevious:o.combine});
+			this.update({text:newText, size:{height:newHeight}}, {withPrevious:combine});
 		}
 		
-		q(this.el())
+		q(this.root)
 			.setAttribute("contenteditable", "")
 			.classList.add('editMode').root
 			.focus();
@@ -3925,11 +4524,11 @@ TextBox = class extends TextBox {
 		let evts = new ListenerGroup();
 		setTimeout(_=> {
 			evts.add(document, 'click', event => {
-				if (event.target.closest('.textBox')!=this.el()[0]) {
-					closeOut.apply(this.el()[0]);
+				if (event.target.closest('.textBox')!=this.root) {
+					closeOut.apply(this.root);
 				}
 			});
-			evts.add(this.el(), 'focusout', closeOut);
+			evts.add(this.root, 'focusout', closeOut);
 		}, 100);
 	}
 
@@ -3940,20 +4539,242 @@ TextBox = class extends TextBox {
 
 	static handleEvents(bnComponent) {
 		$(bnComponent).on('contextmenu', '.textBox.item', event => {
-			let bn = $(bnComponent).data('bn');
-			if (!event.ctrlKey) {
-				let item = bn.getItem(event.currentTarget);
+			let textBox = event.target.closest('.textBox')?.mgr;
+			if (textBox && !event.ctrlKey) {
+				let bn = textBox.net;
 				bn.clearSelection();
-				item.guiToggleSelect(true);
+				textBox.guiToggleSelect(true);
 				event.stopImmediatePropagation();
 				event.preventDefault();
-				item.contextMenu(event);
+				textBox.contextMenu(event);
 			}
+		});
+		$(bnComponent).on("dblclick", ".textBox", function(event) {
+			var $textBox = $(this);
+			var textBox = currentBn.getItem(this);
+			event.preventDefault();
+			event.stopPropagation();
+			textBox.mgr.edit();
 		});
 	}
 }
 
-ImageBox = class extends ImageBox {
+TextBox = class extends TextBox {
+	static DisplayItem = addMixin(this, DisplayItem);
+	// constructor(...args) {
+	// 	super(...args);
+	// 	this.listeners = new Listeners();
+	// 	this.listeners.add('update', msg=>this.updateView(msg));
+	// }
+	// update(m, o = {}) {
+	// 	o.withPrevious ??= false;
+	// 	this.net.changes.addAndDo({
+	// 		old: copyTo(this, copyTo(m,{}), {existingOnly:true}),
+	// 		new: m,
+	// 		withPrevious: o.withPrevious,
+	// 		exec: cur => {
+	// 			copyTo(cur, this);
+	// 			this.listeners.notify('update', cur);
+	// 		}
+	// 	});
+	// }
+	
+	// updateView(m) {
+	// 	console.log('TextBox.updateView');
+	// 	let el = q(this.root);
+	// 	let elInner = el.q('.inner');
+	// 	if (m.text!=null) {
+	// 		elInner.innerTextTEMPFIX = m.text;
+	// 	}
+	// 	if (m.size?.width!==undefined) {
+	// 		el.style.width = m.size.width ? m.size.width+'px' : '';
+	// 	}
+	// 	if (m.size?.height!==undefined) {
+	// 		el.style.height = m.size.height ? m.size.height+'px' : '';
+	// 	}
+	// 	if (m.pos?.x!==undefined) {
+	// 		el.style.left = m.pos.x ? m.pos.x+'px' : '';
+	// 	}
+	// 	if (m.pos?.y!==undefined) {
+	// 		el.style.top = m.pos.y ? m.pos.y+'px' : '';
+	// 	}
+	// 	if (m.id!=null) {
+	// 		el.id = 'display_'+this.id;
+	// 	}
+	// 	if (m.format!=null) {
+	// 		elInner.style.set({
+	// 				background: m.format.backgroundColor,
+	// 				border: m.format.borderColor && m.format.borderColor+' 1px solid',
+	// 				color: m.format.fontColor,
+	// 				fontFamily: m.format.fontFamily,
+	// 				fontSize: m.format.fontSize,
+	// 				fontWeight: m.format.bold,
+	// 				fontStyle: m.format.italic,
+	// 				textAlign: m.format.align,
+	// 				padding: m.format.padding, /// 2023-09:23: Padding in px should be added to outer, in em to inner
+	// 		}, {null:false});
+	// 	}
+	// }
+	
+	// make() {
+	// 	this.root = n(`div.textBox.item#display_${this.id}`,
+	// 		n('div.inner'),
+	// 	);
+	// 	this._elCached = this.root;
+	// }
+
+	// displayItem(outputEl, $displayNode, force = false) {
+	// 	if (this.isHidden() && !force)  return null;
+	// 	if (!outputEl && this.net)  outputEl = this.net.outputEl;
+	// 	var textBox = this;
+	// 	if (!$displayNode) {
+	// 		this.make();
+	// 		this.updateView(this);
+	// 		outputEl.append(this.root);
+	// 		$displayNode = $(this.root);
+	// 	}
+	// 	return $displayNode;
+	// }
+
+	// /// Like make()
+	// /*displayItem(outputEl, $displayNode, force = false) {
+	// 	if (this.isHidden() && !force)  return null;
+	// 	if (!outputEl && this.net)  outputEl = this.net.outputEl;
+	// 	var textBox = this;
+	// 	if (!$displayNode) {
+	// 		$displayNode = $("<div class='textBox item' id=display_"+textBox.id+">")
+	// 			.css({left: textBox.pos.x, top: textBox.pos.y})
+	// 			.css({
+	// 				width: textBox.size.width==-1 ? null : textBox.size.width,
+	// 				height: textBox.size.height==-1 ? null : textBox.size.height
+	// 			})
+	// 			.appendTo(outputEl)
+	// 			.append($('<div class=inner>'));
+	// 		this._elCached = $displayNode;
+	// 		this.updateView(this);
+	// 	}
+	// 	if (textBox.type)  $displayNode.addClass(textBox.type);
+
+	// 	return $displayNode;
+	// }*/
+
+	// guiAddToNet(net) {
+	// 	let textBox = this;
+	// 	net.changes.addAndDo({
+	// 		textBox: this,
+	// 		net: net,
+	// 		redo() {
+	// 			this.textBox.addToNet(net);
+	// 			this.textBox.displayItem(this.net.outputEl);
+	// 		},
+	// 		undo() {
+	// 			this.textBox.delete();
+	// 			textBox.el().remove();
+	// 		},
+	// 	});
+	// 	return this;
+	// }
+
+	// guiDelete(o = {}) {
+	// 	o = {
+	// 		prompt: false,
+	// 		...o
+	// 	};
+
+	// 	let doDelete = _=> {
+	// 		this.net.changes.addAndDo({
+	// 			net: this.net,
+	// 			textBox: this,
+	// 			redo() {
+	// 				/// Remove gui components
+	// 				this.textBox.el().remove();
+					
+	// 				/// Remove from selection if there
+	// 				this.textBox.net.selected.delete(this);
+					
+	// 				/// Delete base object
+	// 				this.textBox.delete();
+	// 			},
+	// 			undo() {
+	// 				this.net.addTextBox(this.textBox);
+	// 				this.textBox.displayItem(this.net.outputEl);
+	// 			},
+	// 		});
+	// 	};
+
+	// 	if (o.prompt) {
+	// 		dialog.popup($('<div>Are you sure?</div>'), {buttons: [
+	// 			$('<button type=button>').html('Delete').on('click', () => {
+	// 				let net = this.net;
+	// 				doDelete();
+	// 				dialog.dismissAll();
+	// 			}),
+	// 			$('<button type=button>').html('Cancel').on('click', dialog.dismissAll),
+	// 		]});
+	// 	}
+	// 	else {
+	// 		doDelete();
+	// 	}		
+	// }
+
+	// guiEdit(o = {}) {
+	// 	o.combine ??= false;
+		
+	// 	let te = this;
+	// 	let closeOut = _=> {
+	// 		let el = q(this.el());
+	// 		let newHeight = el.scrollHeight;
+	// 		el
+	// 			.removeAttribute('contenteditable')
+	// 			.classList.remove('editMode').root;
+	// 		window.getSelection().removeAllRanges();
+	// 		var newText = el.innerTextTEMPFIX;
+
+	// 		evts.remove();
+
+	// 		te.update({text:newText, size:{height:newHeight}}, {withPrevious:o.combine});
+	// 	}
+		
+	// 	q(this.el())
+	// 		.setAttribute("contenteditable", "")
+	// 		.classList.add('editMode').root
+	// 		.focus();
+	// 	document.execCommand('selectAll', false, null);
+		
+	// 	let evts = new ListenerGroup();
+	// 	setTimeout(_=> {
+	// 		evts.add(document, 'click', event => {
+	// 			if (event.target.closest('.textBox')!=this.el()[0]) {
+	// 				closeOut.apply(this.el()[0]);
+	// 			}
+	// 		});
+	// 		evts.add(this.el(), 'focusout', closeOut);
+	// 	}, 100);
+	// }
+
+	// contextMenu(event) {
+	// 	let menu = new TextContextMenu(this);
+	// 	menu.popup({left: event.clientX, top: event.clientY});
+	// }
+
+	// static handleEvents(bnComponent) {
+	// 	$(bnComponent).on('contextmenu', '.textBox.item', event => {
+	// 		let bn = $(bnComponent).data('bn');
+	// 		if (!event.ctrlKey) {
+	// 			let item = bn.getItem(event.currentTarget);
+	// 			bn.clearSelection();
+	// 			item.guiToggleSelect(true);
+	// 			event.stopImmediatePropagation();
+	// 			event.preventDefault();
+	// 			item.contextMenu(event);
+	// 		}
+	// 	});
+	// }
+}
+
+addManager(TextBox, TextBoxManager);
+
+if (false) ImageBox = class extends ImageBox {
 	displayItem(outputEl, $displayNode, force = false) {
 		if (this.isHidden() && !force)  return null;
 		if (!outputEl && this.net)  outputEl = this.net.outputEl;
@@ -4486,6 +5307,241 @@ class ArcSelector {
 			$p.data('arcSelector').guiToggleSelect();
 			$p.data('arcSelector').contextMenu(event);
 			return false;
+		});
+
+		/** Arc drawing. Yay! **/
+		var startNode = null;
+		var DCTIMEOUT = 200; //ms
+		var timerId = null;
+		var singleClick = true;
+		$(bnComponent).find(".bnview").on("mousedown touchstart", ".node .hotSpot, .node .hotSpotReverse", function(event) {
+			event.pageX ??= event.touches[0].pageX;
+			event.pageY ??= event.touches[0].pageY;
+			//$('.bnview').css('touch-action', 'none');
+			/// XXX: Fix, make better way of handling scale!
+			let $item = currentBn.getGraphItems()[0].el();
+			var scale = Math.round($item[0].offsetWidth)/Math.round($item[0].getBoundingClientRect().width);
+			
+			$('body').addClass('disableSelections');
+			if ($(event.target).closest('h6').length)  return;
+			console.log('mousedown');
+			if (singleClick || timerId !== null) {
+				if (!singleClick) {
+					/// We have a double-click, so clear the clock
+					clearTimeout(timerId); timerId = null;
+					event.preventDefault();
+				}
+
+				var $node = $(event.target).closest('.node');
+				startNode = currentBn.find($node);
+
+				var ncs = $(".netSvgCanvas").offset();
+				var sourcePoint = {x: event.pageX*scale - ncs.left, y: event.pageY*scale - ncs.top};
+				var destPoint = {x: sourcePoint.x, y: sourcePoint.y};
+				var sourceBox = draw.getBox($node);
+				var destBox = {x: sourceBox.x, y: sourceBox.y, width: 1, height: 1, borderRadius: 0};
+				var par = sourceBox;
+				var child = destBox;
+				var $arc = null;
+				var arcDirection = 0; /// 0 means left/down, 1 means right/up
+				var origCanvas = {width: $(".netSvgCanvas").width(), height:$(".netSvgCanvas").height()};
+				
+				/// If we're creating a parent (hotSpotReverse), switch around par/child
+				if ($(event.target).is('.hotSpotReverse')) {
+					par = destBox;
+					child = sourceBox;
+					arcDirection = 1;
+				}
+
+				var exitSide = null;
+				function tempMouseMove(event) {
+					event = event.originalEvent;
+					event.preventDefault();
+					event.pageX ??= event.touches[0].pageX;
+					event.pageY ??= event.touches[0].pageY;
+					destPoint.x = event.pageX - ncs.left;
+					destPoint.y = event.pageY - ncs.top;
+					/// Draw arrow to this point
+					destBox.x = (event.pageX - $(".netSvgCanvas").offset().left)*scale;
+					destBox.y = (event.pageY - $(".netSvgCanvas").offset().top)*scale;
+					/// FIX: Obviously don't want to draw a new arrow all the time!
+					if (!$arc) {
+						$arc = draw.drawArrowBetweenBoxes($('.netSvgCanvas'), par, child, {clickable: false});
+						//onsole.log($arc.attr('d'), par, child);
+					}
+					else {
+						draw.drawArrowBetweenBoxes($arc, par, child, {clickable: false});
+						//onsole.log($arc.attr('d'), par, child);
+					}
+					/// Update max x/y as extents for canvas if necessary
+					var b = draw.getBox($arc);
+					//onsole.log("ARC BOX:", b, $arc);
+					var maxX = Math.max(origCanvas.width, (b.x+b.width)*scale);
+					var maxY = Math.max(origCanvas.height, (b.y+b.height)*scale);
+					//onsole.log(maxX, maxY);
+					if (maxX != origCanvas.width || maxY != origCanvas.height) {
+						// $(".netSvgCanvas").attr("width", maxX).attr("height", maxY);
+						draw.resizeCanvas($(".netSvgCanvas"), maxX, maxY);
+					}
+				}
+
+				$(window).on("mousemove touchmove", tempMouseMove);
+
+				/// We bind to window, so that *any* mouseup event (even outside of window)
+				/// clears the startNode
+				$(window).one("mouseup touchend", function(event) {
+					event.pageX ??= event.changedTouches[0].pageX;
+					event.pageY ??= event.changedTouches[0].pageY;
+					event.target = event.changedTouches ? document.elementFromPoint(event.changedTouches[0].clientX,event.changedTouches[0].clientY) : event.target;
+					console.log(event, event.target);
+					$('body').removeClass('disableSelections');
+					if (!singleClick)  event.preventDefault();
+					$(window).unbind("mousemove touchmove", tempMouseMove);
+					/// The mouseup event needs to be from the left-click,
+					/// not a right-click (or middle-click), which would cancel the drag
+					if (startNode && (event.which == 1 || event.changedTouches)) {
+						let $node = $(event.target).closest('.node');
+						let $submodel = $(event.target).closest('.submodel');
+						function addToNode(endNode) {
+							/// Check that the arc is valid
+							if ($arc)  $arc.remove();
+							if (!startNode.wouldBeCycle(endNode,arcDirection)) {
+								if (arcDirection==1) {
+									startNode.guiAddParents([endNode]);
+								}
+								else {
+									endNode.guiAddParents([startNode]);
+								}
+								currentBn.guiUpdateAndDisplayForLast();
+							}
+							else {
+								return false;
+							}
+							return true;
+						}
+						if ($node.length) {
+							let endNode = currentBn.find($node);
+							/// If endNode is in a selection, add to all selected
+							if (currentBn.selected.size && currentBn.selected.has(endNode)) {
+								let numCycles = 0;
+								for (let node of currentBn.selected) {
+									numCycles += !addToNode(node);
+								}
+								if (numCycles>0) {
+									dialog.error(`Could not add ${numCycles} arcs as ${numCycles==1?'it would create a cycle':'they would create cycles'}.<br>(And making DBNs not supported yet.)`);
+								}
+							}
+							/// If endNode is single node, add directly to it
+							else {
+								if (!addToNode(endNode)) {
+									dialog.error('Cannot add arc as it would create a cycle.<br>(And making DBNs not supported yet.)');
+								}
+							}
+						}
+						else if ($submodel.length) {
+							if ($arc)  $arc.remove();
+							let thisStartNode = startNode;
+							let submodel = currentBn.find($submodel);
+							let descendants = thisStartNode.getDescendants();
+							let ancestors = thisStartNode.getAncestors();
+							let nodes = n('ul');
+							let subNodes = submodel.getAllNodes()
+								.filter(n =>
+									/// Don't link to children or parents
+									!n.children.includes(thisStartNode) && !n.parents.includes(thisStartNode)
+									/// Don't parent link to descendants, or child link to ancestors
+									&& !(arcDirection==1 ? descendants.includes(n) : ancestors.includes(n))
+									/// And don't link to myself!
+									&& n != thisStartNode
+								);
+							subNodes = currentBn.topologicalSort(subNodes);
+							//subNodes.sort((a,b) => a.id < b.id ? -1 : 1);
+							subNodes.stableSort((a,b) => a.getSubmodelPathStr() <= b.getSubmodelPathStr() ? -1 : 1);
+
+							let lastNode = null;
+							for (let node of subNodes) {
+								if (!lastNode) {
+									nodes.appendChild( n('h3', node.getSubmodelPathStr()) );
+								}
+								else if (lastNode && node.getSubmodelPathStr() != lastNode.getSubmodelPathStr()) {
+									nodes.appendChild( n('h3', node.getSubmodelPathStr()) );
+								}
+								let li = n('li',
+									n('a', node.id, {href: 'javascript:void(0)', 'data-node-id': node.id, on:{click(event) {
+										let endNode = currentBn.find( $(event.target).data('nodeId') );
+										if (arcDirection==1) {
+											thisStartNode.guiAddParents([endNode]);
+										}
+										else {
+											endNode.guiAddParents([thisStartNode]);
+										}
+										currentBn.guiUpdateAndDisplayForLast();
+										dialog.dismissAll();
+									}}})
+								);
+								nodes.appendChild(li);
+								lastNode = node;
+							};
+							dialog.popup([`Select the node you wish to be the child:`, nodes], {buttons:[
+								n('button', 'Cancel', {type:'button', on:{click:dialog.dismissAll}}),
+							]});
+						}
+						/// Make a new node especially
+						else {
+							var i = 0;
+							while (currentBn.nodesById["node"+i]) i++;
+							if (!$(event.target).closest('.graphItem').length) {
+								/// Remove the arc we were using temporarily
+								if ($arc)  $arc.remove();
+								var nsc = $('.netSvgCanvas').offset();
+								let dropX = (event.pageX - nsc.left)*scale;
+								let dropY = (event.pageY - nsc.top)*scale;
+								let newNode = currentBn.guiAddNode("node"+i, ["true","false"], {
+									cpt:[.5,.5],
+									pos: {x: dropX, y: dropY},
+									submodelPath: currentBn.currentSubmodel,
+								});
+								/// Position it correctly
+								let nodeBox = draw.getBox(newNode.el());
+								let tempX = newNode.pos.x - nodeBox.width/2;
+								let tempY = newNode.pos.y - nodeBox.height/2;
+								newNode.el().css({left: tempX, top: tempY});
+								let endPoints = draw.computeArrowBetweenBoxes(currentBn.outputEl, draw.getBox(newNode.el()), draw.getBox(startNode.el()));
+								let newX = tempX - (endPoints[0].x - dropX);
+								let newY = tempY - (endPoints[0].y - dropY);
+								newNode.apiMoveTo(newX, newY);
+								newNode.el().css({left: newX, top: newY});
+								if (arcDirection==1) {
+									startNode.guiAddParents([newNode]);
+								}
+								else {
+									newNode.guiAddParents([startNode]);
+								}
+								currentBn.changes.linkToPrevious();
+								currentBn.guiUpdateAndDisplayForLast(null, _=> {
+									$('#display_'+newNode.id+' h6').map(function() { currentBn.findItem(this).lightNodeEdit()})
+								});
+							}
+							//event.preventDefault();
+							//return false;
+						}
+					}
+					startNode = null;
+				}).one("click", function(event) {
+					if (event.which != 1) {
+						if (!singleClick)  event.preventDefault();
+					}
+				});
+			}
+			else {
+				/// Start the clock for the next click
+				timerId = setTimeout(function() {
+					/// If no second click, clear the clock
+					timerId = null;
+				}, DCTIMEOUT);
+			}
+		}).on('mouseup', '.node', function() {
+			console.log('mouseup');
 		});
 	}
 }
@@ -5886,6 +6942,321 @@ var app = {
 			currentBn.guiUpdateAndDisplayForLast();
 		},
 	},
+	init() {
+		this.setupMenus();
+		this.handleEvents();
+		this.loadInitialBn();
+	},
+	loadInitialBn() {
+		(async _=>{
+			let bnSnapshot = null;
+			if (window.qs.bnId) {
+				bnSnapshot = await idbKeyVal.get(window.qs.bnId, 'bns');
+			}
+			else {
+				/// Chances of a clash are pretty tiny. Even if the user had 10,000 BNs stored, it'd be roughly 1 in 5,000 chance.
+				let bnId = genPass(8);
+				while (await idbKeyVal.get(bnId))  bnId = genPass(8);
+				window.history.pushState({}, '', changeQsUrl(window.location.href, {bnId}));
+			}
+
+			// let currentSnapshot = sessionStorage.getItem('currentSnapshot');
+			/// XXX: Need better method for handling files from QS clashing with snapshot (e.g. ask user if they want to restore saved version). For now, just disabling.
+			if (bnSnapshot && (window.parent === window || window.qs.withStorage) && !window.qs.noStorage) {
+				app.openBn(BN.from(bnSnapshot), {restored:true});
+				currentBn.display();
+				app.updateBN();
+			}
+			else if (window.qs.file) {
+				await app.loadFromServer(window.qs.file);
+				app.updateBN(_=>{
+					if (window.parent !== window)  window.parent.postMessage({type:'fileLoaded'});
+				});
+			}
+			else {
+				let bn = new BN({filename: `bn${++app.bnCount}.xdsl`});
+				app.openBn(bn);
+				currentBn.display();
+			}
+			
+			window.dispatchEvent(new Event('MakeBelieveLoaded'));
+		})();
+	},
+	setupMenus() {
+		var exampleBns = `Asia.xdsl|Bunce's Farm.xdsl|Cancer.dne|Continuous Test.xdsl|Logical Gates.xdsl|
+		NativeFish_V1.xdsl|RS Latch.xdsl|Umbrella.xdsl|Water.xdsl`.split(/\s*\|\s*/);
+		var exampleBnActions = [];
+		for (var i in exampleBns) {
+			/// Need html escape function
+			exampleBnActions[i] = MenuAction('<span data-name="'+exampleBns[i]+'">'+exampleBns[i]+'</span>', function(event) {
+				window.location.href = "?file=bns/"+$(event.target.closest('.menuAction')).find('span').data("name");
+			});
+		}
+		
+		let updateMethodIs = {[mbConfig.updateMethod+(mbConfig.useWorkers ? 'Worker' : '')]: true};
+
+		app.menu = Menu({type: "bar", items: [
+			Menu({label:"File", items: [
+				MenuAction("New...", function(){ app.newFile(); dismissActiveMenus(); }, {shortcut: 'Alt-N'}),
+				MenuAction("Open...", function(){ app.loadFile(); dismissActiveMenus(); }, {shortcut: 'Ctrl-O'}),
+				MenuAction("Discard Changes", function(){ app.discardChanges(); dismissActiveMenus(); }, {type:'discardChanges'}),
+				MenuAction("Close", function(){ app.closeFile(); dismissActiveMenus(); }),
+				MenuAction(`Name: <input class=bnName type=text value="">`, ()=>{}),
+				MenuAction("Save...", function(){ app.saveFile(); dismissActiveMenus(); }, {shortcut: 'Ctrl-S', type: 'saveItem'}),
+				Menu({label:"Export", items: [
+					MenuAction("Make-Believe .mb", function(){ app.saveFile('mb'); dismissActiveMenus(); }),
+					MenuAction("GeNIe .xdsl", function(){ app.saveFile('xdsl'); dismissActiveMenus(); }),
+					MenuAction("Netica .dne", function(){ app.saveFile('dne'); dismissActiveMenus(); }),
+					MenuAction('<hr>',_=>{}),
+					MenuAction("SVG .svg", function(){ app.exportImage('svg'); dismissActiveMenus(); }),
+					MenuAction("PNG .png", function(){ app.exportImage('png'); dismissActiveMenus(); }),
+				]}),
+				Menu({label: "Example BNs", items: exampleBnActions}),
+				/*MenuAction('<hr>'),
+				MenuAction('Print...', function(){ window.print() }),*/
+			]}),
+			Menu({label:"Edit", items: [
+				MenuAction("Undo", function() { currentBn.changes.undo(); }, {shortcut: 'Ctrl-Z'}),
+				MenuAction("Redo", function() { currentBn.changes.redo(); }, {shortcut: 'Ctrl-Y'}),
+				MenuAction('<hr>', {type: 'separator'}),
+				MenuAction("Cut", function() { app.clipboard.cut(); }, {shortcut: 'Ctrl-X'}),
+				MenuAction("Copy", function() { app.clipboard.copy(); }, {shortcut: 'Ctrl-C'}),
+				MenuAction("Paste", function() { app.clipboard.paste(); }, {shortcut: 'Ctrl-V'}),
+				MenuAction("Delete", function() { app.clipboard.delete(); }, {shortcut: 'Delete'}),
+				MenuAction('<hr>', {type: 'separator'}),
+				MenuAction("Find", _=> { app.helpers.finder.init(); dismissActiveMenus(); }, {shortcut: 'Ctrl-F'}),
+				MenuAction('<hr>', {type: 'separator'}),
+				MenuAction("Select All", function() { currentBn.selectAll(); }, {shortcut: 'Ctrl-A'}),
+				Menu({label:"Select", items: [
+					['Root Nodes', 'rootNodes'],
+					['Leaf Nodes', 'leafNodes'],
+					['Arcs', 'arcs'],
+				].map(([label,type]) => MenuAction(label, _=> { currentBn.setSelection(currentBn.findItems(type)); dismissActiveMenus(); }))}),
+			]}),
+			Menu({label:"View", items: [
+				MenuAction('<input type="range" name="viewZoom" min="0.25" max="3" step="0.125" value="1"> <span class="viewZoomText">100%</span>', function(){}),
+				MenuAction("Auto-Layout", function() { app.autoLayout(); dismissActiveMenus(); }, {shortcut: 'Ctrl-Shift-A'}),
+				MenuAction("Auto-Layout (Left to Right)", function() { app.autoLayout(null, {direction: 'LR'}); dismissActiveMenus(); }, {shortcut: 'Ctrl-Shift-A'}),
+				MenuAction(n('span',n('input.fullScreen',{type:'checkbox'})," Full Screen"), _=> {
+					document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+					//q('input.fullScreen').set({checked: !document.fullscreenElement});
+					dismissActiveMenus();
+				}, {on_show: _=>q('input.fullScreen').set({checked: !!document.fullscreenElement})}),
+				Menu({label: "Nodes", items: [
+					MenuAction('Bare Labels Only', function() { app.changeNodeView('bareLabel'); dismissActiveMenus(); }),
+					MenuAction('Labels Only', function() { app.changeNodeView('label'); dismissActiveMenus(); }),
+					MenuAction('Oval Labels Only', function() { app.changeNodeView('labelOval'); dismissActiveMenus(); }),
+					MenuAction('Labels & States Only', function() { app.changeNodeView('labelStates'); dismissActiveMenus(); }),
+					MenuAction('Detailed Nodes', function() { app.changeNodeView('detailed'); dismissActiveMenus(); }),
+					MenuAction('Stacked Bars', function() { app.changeNodeView('stacked'); dismissActiveMenus(); }),
+					MenuAction('<hr>', {type: 'separator'}),
+					MenuAction('Header: ID', function() { app.changeNodeHeader('id'); dismissActiveMenus(); }),
+					MenuAction('Header: Label', function() { app.changeNodeHeader('label'); dismissActiveMenus(); }),
+					MenuAction('Header: Label + ID', function() { app.changeNodeHeader('idLabel'); dismissActiveMenus(); }),
+				]}),
+				Menu({label: 'Spacing', items: [
+					MenuAction('<span class=spaceLabel>Item Spacing:</span> <input type="range" name="viewSpacing" min="0.125" max="3" step="0.125" value="1"> <span class="viewSpacingText">100%</span>', function() {}),
+					MenuAction('<span class=spaceLabel>Horizontal Spacing:</span> <input type="range" name="viewSpacing" data-type="horizontal" min="0.125" max="3" step="0.125" value="1"> <span class="viewSpacingText">100%</span>', function() {}),
+					MenuAction('<span class=spaceLabel>Vertical Spacing:</span> <input type="range" name="viewSpacing" data-type="vertical" min="0.125" max="3" step="0.125" value="1"> <span class="viewSpacingText">100%</span>', function() {}),
+					MenuAction('<hr>', {type: 'separator'}),
+					MenuAction('Insert Square Space', _=> { app.insertSpace('rectangular'); dismissActiveMenus(); }),
+					MenuAction('Insert Horizontal Space', _=> { app.insertSpace('horizontal'); dismissActiveMenus(); }),
+					MenuAction('Insert Vertical Space', _=> { app.insertSpace('vertical'); dismissActiveMenus(); }),
+				]}),
+				MenuAction('<hr>', {type: 'separator'}),
+				MenuAction('<input type="checkbox" class=showArcStrengths> Show Arc Strengths', function() {
+					if ( !$('.showArcStrengths').prop('checked') ) {
+						currentBn.trackArcInfluences();
+						app.updateBN();
+						$('.showArcStrengths').prop('checked', true);
+					}
+					else {
+						currentBn.removeTrackArcInfluences();
+						$('.showArcStrengths').prop('checked', false);
+					}
+				}),
+				Menu({label:"Highlight on Selection", items: [
+					['None', null],
+					['Selection', 'selection'],
+					['Parents', 'parent'],
+					['Children', 'child'],
+					['Parents & Children', 'direct'],
+					['Ancestors', 'ancestor'],
+					['Descendants', 'descendant'],
+					['Markov Blanket', 'markovBlanket'],
+					['D-Connected', 'dconnected'],
+					['Directed Paths (2 nodes)', 'directedPaths'],
+					['D-Connected Paths (2 nodes)', 'dconnectedPaths'],
+					['D-Connected, Indirect (2 nodes)', 'dconnectedIndirect'],
+					['Backdoor Paths', 'backpaths'],
+					['Selection Bias', 'selectionBias'],
+					['Closest Ancestors', 'confounder'],
+					['Closest Descendants', 'collider'],
+					].map(([label, type]) => {
+						return MenuAction(n('span', n('input', {type:'checkbox',class:`highlightOnSelection ${type??'none'}`,checked:type?null:'true'}), label), _=> app.highlightOnSelection(type));
+					})
+				}),
+				MenuAction('Highlight D-Connected Nodes', function() {
+					if ($(".dconnected").length) {
+						$(".dconnected").removeClass("dconnected");
+					}
+					else {
+						/// Find d-connected nodes for all selected nodes (I'm not sure
+						/// this makes much sense)
+						for (var node of currentBn.selected) {
+							//onsole.log('sel:', item);
+							if (node instanceof Node) {
+								var dConnectedNodes = currentBn.findAllDConnectedNodes2(node);
+								for (var i=0; i<dConnectedNodes.length; i++) {
+									var connectedNode = dConnectedNodes[i];
+									$("#display_"+connectedNode.id).addClass("dconnected");
+								}
+							}
+						}
+
+					}
+				}),
+				MenuAction('Toggle BN Description', function() {
+					currentBn.showComment(!$('.sidebar > .comment').is(':visible'), {force:true});
+				}),
+			]}),
+			Menu({label:"Network", items: [
+				MenuAction("Update", function() { app.updateBN(); dismissActiveMenus(); }),
+				Menu({label:"Inference Methods", items: [
+					MenuAction("Off", event => app.setUpdateMethod('off', false, event.target), {type: updateMethodIs.off ? 'checked' : ''}),
+					MenuAction("Likelihood Weighting", event => app.setUpdateMethod('likelihoodWeighting', false, event.target), {type: updateMethodIs.likelihoodWeighting ? 'checked' : ''}),
+					MenuAction("Likelihood Weighting (Worker)", event => app.setUpdateMethod('likelihoodWeighting',true, event.target), {type: updateMethodIs.likelihoodWeightingWorker ? 'checked' : ''}),
+					MenuAction("Junction Tree", event => app.setUpdateMethod('junctionTree', false, event.target), {type: updateMethodIs.junctionTree ? 'checked' : ''}),
+					MenuAction("Junction Tree (Worker)", event => app.setUpdateMethod('junctionTree', true, event.target), {type: updateMethodIs.junctionTreeWorker ? 'checked' : ''}),
+					MenuAction("Auto Select (Worker)", event => app.setUpdateMethod('autoSelect', false, event.target), {type: updateMethodIs.autoSelect ? 'checked' : ''}),
+				]}),
+				MenuAction("Find Good Decisions", function() { app.findGoodDecisions(); dismissActiveMenus(); }),
+				MenuAction('Time Limit: <input type="text" name="timeLimit" value="0">ms', function() { }),
+				MenuAction('# Samples: <input type="text" name="iterations" value="'+BN.defaultIterations+'">', function() { }),
+				Menu({label:"Learn", items: [
+					MenuAction('Add Nodes from File', _=> { app.addNodesFromFile(); dismissActiveMenus(); } ),
+					MenuAction('Parameters: Counting...', function() { app.learnParametersCounting(); dismissActiveMenus(); } ),
+					MenuAction('Parameters: EM...', function() { app.learnParametersEm(); dismissActiveMenus(); } ),
+					MenuAction('Structure: Naive Bayes...', function() { app.learnStructureNaiveBayes(); dismissActiveMenus(); } ),
+					MenuAction('Structure: TAN...', function() { app.learnStructureTan(); dismissActiveMenus(); } ),
+					MenuAction('<hr>', {type: 'separator'}),
+					Menu({label: 'Auto re-parametrise with', type: 'reparameterizeMenu', items: [
+						MenuAction('Choose file...', _=>app.reparamChooseFile()),
+					]}),
+				]}),
+				MenuAction('Flatten Network', function() { app.flattenNetwork(); dismissActiveMenus(); } ),
+				MenuAction('Compare Network...', function() { app.compareNetwork(); dismissActiveMenus(); } ),
+			]}),
+			Menu({label:'Evidence', type:'evidenceMenu', items: [
+				MenuAction('Clear Evidence', function() { app.clearEvidence(); dismissActiveMenus(); } ),
+				MenuAction('Calculate Probability of Evidence', function() { app.showProbabilityOfEvidence(); dismissActiveMenus(); } ),
+				MenuAction('<hr>', {type: 'separator'}),
+				MenuAction('Store Current', function() { app.storeEvidence(); }),
+				MenuAction('<hr>', {type: 'separator'}),
+			]}),
+			Menu({label:"Toolbox", type:'toolboxMenu', items: [
+				Menu({label:"Node", type:'toolboxMenu', items: [
+					MenuAction('Transform Nodes', _=> { app.helpers.transformNodes.init(); dismissActiveMenus(); }),
+				]}),
+				MenuAction('Validate Node by Node', _=> { new EachValidator().setup(); dismissActiveMenus(); }),
+				MenuAction('Treament-Outcome Analysis', _=>{app.helpers.treatmentOutcome.init(); dismissActiveMenus()}),
+				MenuAction('Mutual Information', _=>{app.helpers.mi.init(); dismissActiveMenus()}),
+				MenuAction('Best EV (temporary)', _=>{app.helpers._tempBestEv.init(); dismissActiveMenus()}),
+				MenuAction('Variable Dictionary', _=>{app.helpers.varDict.init(); dismissActiveMenus()}),
+				MenuAction('Network Information', _=>{app.helpers.stats.init(); dismissActiveMenus()}),
+				MenuAction('Compare BN CPTs', _=>{app.helpers.compareCpts.init(); dismissActiveMenus()}),
+				MenuAction('View Junction Tree', _=>{app.helpers.jtree.init(); dismissActiveMenus()}),
+				MenuAction('<hr>', {type: 'separator'}),
+				MenuAction(n('div',n('input', {type:'checkbox', name:'navigateByNode'}), 'Navigate by Node'), _=>{app.helpers.navigateByNode.init(); dismissActiveMenus()}),
+			]}),
+			Menu({label:"(Dev)", type: 'debugMenu', items: [
+				MenuAction(n('span',n('input.cecCheck', {type:'checkbox',checked:mbConfig.jtree.crossEvidenceCaching?'checked':null}), 'Between evidence caching (JTree)'), _=>{
+					mbConfig.jtree.crossEvidenceCaching = !mbConfig.jtree.crossEvidenceCaching;
+					$('.cecCheck').prop('checked', mbConfig.jtree.crossEvidenceCaching);
+				}),
+				MenuAction('# Workers: <input type="text" name="numWorkers" value="2">', function() { }),
+				MenuAction('# Perf Loops: <input type="text" name="perfLoops" value="100">', function() { }),
+				MenuAction('# Perf Samples: <input type="text" name="perfIterations" value="10000">', function() { }),
+				MenuAction('Perf Check Local', function() { currentBn.perfCheck(); }),
+				MenuAction('Perf Check Worker', function() { currentBn.perfCheckWorker(); }),
+				MenuAction("Load Data...", function(){ $('#openDataFile').change(function() {
+					app.readChosenFile(this, (fileData,fileName) => app.loadData(fileData, {fileName}));
+				}).click(); dismissActiveMenus(); }),
+				MenuAction("GUI Testing...", _=>{ testing.init(); dismissActiveMenus(); }),
+				MenuAction(n('span', n('input.alosCheck', {type:'checkbox',checked:app.autoLayoutOnStructure?'checked':null}), 'Auto-Layout On Structure'), _=>{
+					app.autoLayoutOnStructure = !app.autoLayoutOnStructure;
+					$('.alosCheck').prop('checked', app.autoLayoutOnStructure);
+					app.alosFunc ??= _=>{
+						app.autoLayout();
+					};
+					if (app.autoLayoutOnStructure) {
+						currentBn.addListener('structureChange', app.alosFunc);
+					}
+					else {
+						currentBn.removeListener('structureChange', app.alosFunc);
+					}
+				}),
+				MenuAction('<hr>', {type: 'separator'}),
+				Menu({label:'Themes', items: [
+					MenuAction(n('div',
+						n('input', {type: 'radio', name: 'menuTheme', value: ''}),
+						'Original'
+					), _=> {app.setTheme(null); dismissActiveMenus(); }),
+					MenuAction(n('div',
+						n('input', {type: 'radio', name: 'menuTheme', value: 'netica'}),
+						'Netica'
+					), _=> {app.setTheme('netica'); dismissActiveMenus(); }),
+					MenuAction(n('div',
+						n('input', {type: 'radio', name: 'menuTheme', value: 'genie'}),
+						'GeNIe'
+					), _=> {app.setTheme('genie'); dismissActiveMenus(); }),
+				]}),
+			]}),
+			Menu({label:"Help", items: [
+				MenuAction('Keyboard Shortcuts', function() { app.showShortcuts(); }),
+				MenuAction('About Make-Believe', function() { app.about(); }),
+			]}),
+		]});
+
+		$("body").prepend(app.menu.make());
+		
+		let theme = localStorage.getItem('theme');
+		app.setTheme(theme);
+		
+		stormy.on('startup', function(available) {
+			if (available) {
+				var ma = MenuAction("Save As...", function(){ app.saveAsFile(); dismissActiveMenus(); }, {shortcut: 'Ctrl-Alt-S'});
+				$('.bar.menu .saveItem')
+					.after(ma.make())
+					.find('.label').text('Save');
+			}
+		});
+
+		/// Setup initial keyboard shortcuts (these can be overriden after the fact)
+		Object.assign(app.keyboardShortcuts, app.menu.collectShortcuts());
+		let isShortcutKeyDown = false;
+		$(document).on('keydown', function(event) {
+			if (isShortcutKeyDown)  return;
+			if (!$(event.target).is('textarea, input, select, [contenteditable]')) {
+				/// Make hash from event
+				var keyHash = (event.ctrlKey?'Ctrl-':'')
+					+ (event.altKey?'Alt-':'')
+					+ (event.shiftKey?'Shift-':'')
+					+ (event.metaKey?'Meta-':'')
+					+ event.key[0].toUpperCase()+event.key.slice(1);
+				//onsole.log(keyHash);
+				if (app.keyboardShortcuts[keyHash]) {
+					isShortcutKeyDown = true;
+					event.preventDefault();
+					app.keyboardShortcuts[keyHash].action();
+					return false;
+				}
+			}
+		});
+		$(document).on('keyup', function(event) {
+			isShortcutKeyDown = false;
+		});
+	},
 	setTheme(theme) {
 		if (theme == "null")  theme = null;
 		document.querySelectorAll(`style[data-style]`).forEach(s => s.disabled = true);
@@ -6646,7 +8017,7 @@ var app = {
 			currentBn.headerFormat = function(id,label) { return toHtml(label ? label : id); }
 		}
 		else if (type=='idLabel') {
-			currentBn.headerFormat = function(id,label) { return toHtml((label ? label+": " : "")+id); }
+			currentBn.headerFormat = function(id,label) { return n('span', n('strong', id + (label ? ": " : "")), n('span', {style: 'font-weight: normal'}, label)); }
 		}
 		var graphItems = currentBn.getGraphItems();
 		for (var i=0; i<graphItems.length; i++) {
@@ -7319,14 +8690,17 @@ var app = {
 							n('div.field',
 								n('label', 'Target:'), n('select.target', {on:{input: _=>this.update()}}),
 							),
+							n('div.field',
+								n('label', 'Baseline EU:'), n('span.baselineEv', '-'),
+							),
 						),
 						n('div.tablePar',
 							n('table',
-								n('thead', n('tr', n('th', 'Node'), n('th', 'AbsBEV'), n('th', 'ΔBEV'))),
+								n('thead', n('tr', n('th', 'Node'), n('th', 'Best EU'), n('th', 'ΔEU'))),
 								n('tbody'),
 							),
 						),
-					), {title: 'Sensitivity (Mutual Information)', onclose: _=>currentBn.removeListener('change', changeEvent)});
+					), {title: 'Expected Utility under Intervention', onclose: _=>currentBn.removeListener('change', changeEvent)});
 					this.rootEl.closest('.box').querySelector('.titlebar .close').prepend(this.rootEl.querySelector('button.cp'));
 					this.rootEl.append(n('style.bevStyle',`
 						.sidebar .bevTable { display: flex; flex-direction: column; }
@@ -7353,7 +8727,8 @@ var app = {
 				/// Clear the table (not header)
 				table.querySelector('tbody').innerHTML = '';
 				if (targetSel.value) {
-					let bevTable = await currentBn._tempCalcEv(targetSel.value);
+					let {table:bevTable,baselineEv} = await currentBn._tempCalcEv(targetSel.value);
+					this.rootEl.querySelector('.baselineEv').textContent = sigFig(baselineEv, 3);
 					let rows = Object.values(bevTable);
 					rows.sort((a,b) => b.deltaBev-a.deltaBev);
 					table.querySelector('tbody').append(...rows.map(({node,absBev,deltaBev}) => n('tr', n('td',node), n('td.absBev',sigFig(absBev,3)),n('td.deltaBev',sigFig(deltaBev,3)))));
@@ -7585,14 +8960,14 @@ var app = {
 							});
 						}),
 						MenuAction('Roots to Leaves', _=>{
-							topologicalSort(nodes).forEach(n => {
+							BN.prototype.topologicalSort(nodes).forEach(n => {
 								table.querySelector('tbody').append(
 									table.querySelector(`[data-node-id="${n.id}"]`)
 								);
 							});
 						}),
 						MenuAction('Leaves to Roots', _=>{
-							topologicalSort(nodes).reverse().forEach(n => {
+							BN.prototype.topologicalSort(nodes).reverse().forEach(n => {
 								table.querySelector('tbody').append(
 									table.querySelector(`[data-node-id="${n.id}"]`)
 								);
@@ -7600,8 +8975,11 @@ var app = {
 						}),
 						MenuAction('Colour (Roots-Leaves)', _=>{
 							let colorMap = new Map();
-							topologicalSort(nodes).forEach(n => colorMap.has(n.format.backgroundColor) || colorMap.set(n.format.backgroundColor, colorMap.size));
-							let sortedNodes = nodes.slice().sort((a,b)=>colorMap.get(a.format.backgroundColor) - colorMap.get(b.format.backgroundColor));
+							let colorMap2 = new Map();
+							let topologicalNodes = BN.prototype.topologicalSort(nodes);
+							topologicalNodes.forEach(n => colorMap.has(n.format.backgroundColor) || colorMap.set(n.format.backgroundColor, colorMap.size));
+							topologicalNodes.forEach(n => colorMap2.has(n.format.fontColor) || colorMap2.set(n.format.fontColor, colorMap2.size));
+							let sortedNodes = topologicalNodes.slice().sort((a,b)=>(colorMap.get(a.format.backgroundColor) - colorMap.get(b.format.backgroundColor)) || (colorMap2.get(a.format.fontColor) - colorMap2.get(b.format.fontColor)));
 							sortedNodes.forEach(n => {
 								table.querySelector('tbody').append(
 									table.querySelector(`[data-node-id="${n.id}"]`)
@@ -7610,8 +8988,11 @@ var app = {
 						}),
 						MenuAction('Colour (Leaves-Roots)', _=>{
 							let colorMap = new Map();
-							topologicalSort(nodes).reverse().forEach(n => colorMap.has(n.format.backgroundColor) || colorMap.set(n.format.backgroundColor, colorMap.size));
-							let sortedNodes = nodes.slice().sort((a,b)=>colorMap.get(a.format.backgroundColor) - colorMap.get(b.format.backgroundColor));
+							let colorMap2 = new Map();
+							let topologicalNodes = BN.prototype.topologicalSort(nodes).reverse();
+							topologicalNodes.forEach(n => colorMap.has(n.format.backgroundColor) || colorMap.set(n.format.backgroundColor, colorMap.size));
+							topologicalNodes.forEach(n => colorMap2.has(n.format.fontColor) || colorMap2.set(n.format.fontColor, colorMap2.size));
+							let sortedNodes = topologicalNodes.slice().sort((a,b)=>(colorMap.get(a.format.backgroundColor) - colorMap.get(b.format.backgroundColor)) || (colorMap2.get(a.format.fontColor) - colorMap2.get(b.format.fontColor)));
 							sortedNodes.forEach(n => {
 								table.querySelector('tbody').append(
 									table.querySelector(`[data-node-id="${n.id}"]`)
@@ -7689,6 +9070,262 @@ var app = {
 			]});
 		}, 'text');
 	},
+	handleMenuEvents() {
+		/// BN Name
+		$('.menu.bar .bnName').on('input change', function(evt) {
+			let newName = $(this).val();
+			currentBn.fileName = currentBn.fileName.replace(/^.*(\..*?)$/, newName+'$1');
+			app.updateBnName();
+		});
+
+		$("[name=viewZoom]").on("input", function(evt) {
+			$('.itemList').addClass('unfocusMenu');
+			$(this).closest('.menuAction').addClass('focusMenu');
+			var $range = $(evt.target);
+			let jtc = q('.jtreeView .canvas');
+			if (jtc) {
+				$(jtc).css({transformOrigin: 'top left', transform: 'scale('+$range.val()+')'});
+			}
+			else {
+				q('.bnview').style.zoom = $range.val();
+				/// Fx doesn't currently handle zoom for svg properly (2024-11-19)
+				fixZoomSvg();
+			}
+			$(".viewZoomText").text(Math.round($range.val()*100)+"%");
+		}).on('change mouseup', function(evt) {
+			$('.itemList').removeClass('unfocusMenu');
+			$(this).closest('.menuAction').removeClass('focusMenu');
+		}).on("dblclick", function(evt) {
+			var $range = $(evt.target);
+			$range.val(1);
+			$range.trigger("input");
+			$range.trigger("mouseup");
+		});
+
+		let doingSpacing = false;
+		let savedPos = null;
+		let currentSubItems = null;
+		let spacingMins = {x: null, y: null};
+		$("[name=viewSpacing]").on("input", function(evt) {
+			$('.itemList').addClass('unfocusMenu');
+			$(this).closest('.menuAction').addClass('focusMenu');
+			let type = this.dataset.type;
+			let mins = spacingMins;
+			if (!doingSpacing) {
+				currentSubItems = currentBn.getCurrentSubmodel().getItems();
+				savedPos = currentSubItems.map(n => ({...n.pos}));
+				mins.x = 10000000, mins.y = 100000000;
+				savedPos.forEach(pos => {
+					mins.x = Math.min(pos.x, mins.x);
+					mins.y = Math.min(pos.y, mins.y);
+				});
+			}
+			doingSpacing = true;
+			let $range = $(evt.target);
+			let scale = Number($range.val());
+			let xScale = scale;
+			let yScale = scale;
+			if (type == 'horizontal')  yScale = 1;
+			if (type == 'vertical')  xScale = 1;
+			$(this).closest('.menuAction').find('.viewSpacingText').text(Math.round(scale*100)+"%");
+			currentSubItems.forEach((n,i) => { n.moveTo((savedPos[i].x-mins.x)*xScale+mins.x, (savedPos[i].y-mins.y)*yScale+mins.y, false); });
+		}).on('change', function(evt) {
+			$('.itemList').removeClass('unfocusMenu');
+			$(this).closest('.menuAction').removeClass('focusMenu');
+			currentBn.changes.doCombined(_=> {
+				currentSubItems.forEach((n,i) => {
+					let newPos = {...n.pos};
+					n.apiMoveTo(savedPos[i].x, savedPos[i].y);
+					n.moveTo(newPos.x, newPos.y);
+				});
+			});
+			$(evt.target).val(1);
+			$('.viewSpacingText').text('100%');
+			currentSubItems = null;
+			doingSpacing = false;
+			savedPos = null;
+		}).on('mouseup', function(evt) {
+			$('.itemList').removeClass('unfocusMenu');
+			$(this).closest('.menuAction').removeClass('focusMenu');
+		});/*.on("dblclick", function(evt) {
+			let $range = $(evt.target);
+			$range.val(1);
+			$range.trigger("change");
+		});*/
+
+		/// Handle an example BN load
+		$(".exampleBns").on("change", function() {
+			window.location.href = "?file=bns/"+$(this).find("option:selected").text();
+		});
+
+		/// Handle changes to iterations
+		$("[name=iterations]").on("keyup", function(evt) {
+			var numIterations = $(evt.target).val();
+			currentBn.iterations = numIterations;
+		});
+		$("[name=timeLimit]").on("keyup", function(evt) {
+			var timeLimit = parseInt($(evt.target).val());
+			currentBn.timeLimit = timeLimit;
+			if (timeLimit) {
+				$("[name=iterations]")[0].disabled = true;
+			}
+			else {
+				$("[name=iterations]")[0].disabled = false;
+			}
+		});
+		$("[name=perfLoops]").on("keyup", function(evt) {
+			var numLoops = $(evt.target).val();
+			currentBn.perfLoops = numLoops;
+		});
+		$("[name=perfIterations]").on("keyup", function(evt) {
+			var numIterations = $(evt.target).val();
+			currentBn.perfIterations = numIterations;
+		});
+		$("[name=numWorkers]").on("keyup", function(evt) {
+			var numWorkers = $(evt.target).val();
+			currentBn.numWorkers = parseInt(numWorkers);
+			currentBn.needsCompile = true;
+		});
+	},
+	handleConsole() {
+		/// Console... I may remove this, as not super useful. Or replace with basic JS repl?
+		$(document).on('keydown', (event) => {
+			if (event.ctrlKey && event.key == 'F12') {
+				$('.console').toggle();
+				$('.consoleInput').focus();
+			}
+		});
+
+		consoleHistory = [];
+		consoleHistory.pos = 0;
+		$('.consoleInput').on('keydown', (event) => {
+			console.log(event.key);
+			if (event.key == 'Enter') {
+				var txt = $('.consoleInput').val();
+				console.log(txt);
+				
+				if (txt != consoleHistory[consoleHistory.length-1]) {
+					consoleHistory.push(txt);
+					consoleHistory.pos++;
+				}
+				$('.consoleInput').val('');
+				$('.consoleInput').blur();
+				
+				let lns = txt.split(/;/);
+				
+				for (let ln of lns) {
+					var m = ln.match(/^(.*)(<-|->)(.*)$/);
+					console.log(m);
+					if (m) {
+						var parents = m[1].trim().split(/\s*,\s*/);
+						var children = m[3].trim().split(/\s*,\s*/);
+						console.log(parents, children);
+						for (var parent of parents) {
+							for (var child of children) {
+								if (!currentBn.nodesById[parent])  currentBn.addNode(parent);
+								if (!currentBn.nodesById[child])  currentBn.addNode(child);
+								var parentNode = currentBn.nodesById[parent];
+								var childNode = currentBn.nodesById[child];
+								parentNode.addChildren([childNode]);
+							}
+						}
+						currentBn.display();
+						app.autoLayout(() => {
+							$('.consoleInput').focus();
+						});
+					}
+				}
+			}
+			else if (event.key == 'ArrowUp') {
+				if (consoleHistory.pos > 0) {
+					consoleHistory.pos--;
+					$('.consoleInput').val(consoleHistory[consoleHistory.pos]);
+				}
+			}
+			else if (event.key == 'ArrowDown') {
+				if (consoleHistory.pos < consoleHistory.length) {
+					consoleHistory.pos++;
+					if (consoleHistory.pos < consoleHistory.length) {
+						$('.consoleInput').val(consoleHistory[consoleHistory.pos]);
+					}
+					else {
+						$('.consoleInput').val('');
+					}
+				}
+			}
+		});
+	},
+	handleEvents() {
+		this.handleMenuEvents();
+		this.handleConsole();
+		BN.handleEvents($('.bnComponent')[0]);
+		Submodel.handleEvents($('.bnComponent')[0]);
+		DisplayItem.handleEvents($('.bnComponent')[0]);
+		Node.handleEvents($('.bnComponent')[0]);
+		TextBoxManager.handleEvents($('.bnComponent')[0]);
+		ArcSelector.handleEvents($('.bnComponent')[0]);
+			
+		/// App focus. Not sure how expensive this is.
+		document.addEventListener('click', event => {
+			app.windowFocus = event.target.closest('.dialog, .bnview');
+		});
+
+		/** Convert all contenteditable pastes to plain text first, unless turned off with
+		 * event.mbNoGlobalPasteHandling.
+		 */
+		document.addEventListener('paste', event => {
+			if (!event.mbNoGlobalPasteHandling && event.target.closest('[contenteditable]')) {
+				event.preventDefault();
+				let text = event.clipboardData.getData('text/plain');
+
+				document.execCommand('insertText', false, text);
+			}
+		});
+		
+		/// Allow dropping of BN files to open them
+		$("body").on("drop", function(event) {
+			event.preventDefault();
+			var dt = event.originalEvent.dataTransfer;
+			if (dt.files) {
+				app.fileLoaded(dt.files[0], app.updateBN);
+			}
+		}).on("dragover", function(event) {
+			event.preventDefault();
+			// Set the dropEffect to move
+			event.originalEvent.dataTransfer.dropEffect = "open";
+		});
+
+		/* Fix contenteditable empty on td/th on firefox.
+		Block empty contenteditable fixing with, e.g., <div default-empty> */
+		q(document).listeners.add('focusin', event => {
+			let ce = event.target.matches?.('[contenteditable]:is(td,th):not([default-empty])') && event.target;
+			if (ce) {
+				if (!ce.textContent.trim())  ce.innerHTML='<br>';
+			}
+		}).add('focusout', event => {
+			let ce = event.target.matches?.('[contenteditable]:is(td,th):not([default-empty])') && event.target;
+			if (ce) {
+				if (!ce.textContent.trim())  ce.innerHTML='';
+			}
+		});
+		
+		$(window).on('beforeunload', function() {
+			if (currentBn && currentBn.unsavedChanges) {
+				idbKeyVal.set(window.qs.bnId, currentBn.toJSON(), 'bns');
+				/// Still need to prompt, because we don't know why we're unloading
+				return false;
+			}
+		});
+
+		window.matchMedia("print").addEventListener('change',function(e) {currentBn.updateArcs()});
+		$(window).on('beforeprint', function() {
+			$('#printSheet').attr('media', 'screen');
+			currentBn.updateArcs();
+			$('#printSheet').attr('media', 'print');
+		}).on('afterprint', function() {
+			currentBn.updateArcs();
+		});
+	},
 };
 
 /// Extra utilities
@@ -7725,6 +9362,7 @@ var EachValidator = class {
 		);
 		this.structureChange();
 		currentBn.addListener('structureChange', _=>this.structureChange());
+		currentBn.addListener('selectionChange', _=>this.selectionChange());
 		this.highlightCurrent();
 	}
 	
@@ -7754,6 +9392,15 @@ var EachValidator = class {
 		$('path.dependency').css('opacity', 1);
 		currentBn.clearSelection();
 		document.querySelector('.eachValidator').remove();
+	}
+
+	selectionChange() {
+		let node = [...currentBn.selected].filter(item => item._type=='Node')[0];
+		if (node && node.id != q('.eachValidator .currentNode').value) {
+			this.descChanged();
+			q('.eachValidator .currentNode').value = node.id;
+			this.newSelected();
+		}
 	}
 	
 	structureChange() {
@@ -7811,1369 +9458,7 @@ $(document).ready(function() {
 		}
 	});
 
-	var exampleBns = `Asia.xdsl|Bunce's Farm.xdsl|Cancer.dne|Continuous Test.xdsl|Logical Gates.xdsl|
-		NativeFish_V1.xdsl|RS Latch.xdsl|Umbrella.xdsl|Water.xdsl`.split(/\s*\|\s*/);
-	var exampleBnActions = [];
-	for (var i in exampleBns) {
-		/// Need html escape function
-		exampleBnActions[i] = MenuAction('<span data-name="'+exampleBns[i]+'">'+exampleBns[i]+'</span>', function(event) {
-			window.location.href = "?file=bns/"+$(event.target.closest('.menuAction')).find('span').data("name");
-		});
-	}
-	
-	let updateMethodIs = {[mbConfig.updateMethod+(mbConfig.useWorkers ? 'Worker' : '')]: true};
-
-	app.menu = Menu({type: "bar", items: [
-		Menu({label:"File", items: [
-			MenuAction("New...", function(){ app.newFile(); dismissActiveMenus(); }, {shortcut: 'Alt-N'}),
-			MenuAction("Open...", function(){ app.loadFile(); dismissActiveMenus(); }, {shortcut: 'Ctrl-O'}),
-			MenuAction("Discard Changes", function(){ app.discardChanges(); dismissActiveMenus(); }, {type:'discardChanges'}),
-			MenuAction("Close", function(){ app.closeFile(); dismissActiveMenus(); }),
-			MenuAction(`Name: <input class=bnName type=text value="">`, ()=>{}),
-			MenuAction("Save...", function(){ app.saveFile(); dismissActiveMenus(); }, {shortcut: 'Ctrl-S', type: 'saveItem'}),
-			Menu({label:"Export", items: [
-				MenuAction("Make-Believe .mb", function(){ app.saveFile('mb'); dismissActiveMenus(); }),
-				MenuAction("GeNIe .xdsl", function(){ app.saveFile('xdsl'); dismissActiveMenus(); }),
-				MenuAction("Netica .dne", function(){ app.saveFile('dne'); dismissActiveMenus(); }),
-				MenuAction('<hr>',_=>{}),
-				MenuAction("SVG .svg", function(){ app.exportImage('svg'); dismissActiveMenus(); }),
-				MenuAction("PNG .png", function(){ app.exportImage('png'); dismissActiveMenus(); }),
-			]}),
-			Menu({label: "Example BNs", items: exampleBnActions}),
-			/*MenuAction('<hr>'),
-			MenuAction('Print...', function(){ window.print() }),*/
-		]}),
-		Menu({label:"Edit", items: [
-			MenuAction("Undo", function() { currentBn.changes.undo(); }, {shortcut: 'Ctrl-Z'}),
-			MenuAction("Redo", function() { currentBn.changes.redo(); }, {shortcut: 'Ctrl-Y'}),
-			MenuAction('<hr>', {type: 'separator'}),
-			MenuAction("Cut", function() { app.clipboard.cut(); }, {shortcut: 'Ctrl-X'}),
-			MenuAction("Copy", function() { app.clipboard.copy(); }, {shortcut: 'Ctrl-C'}),
-			MenuAction("Paste", function() { app.clipboard.paste(); }, {shortcut: 'Ctrl-V'}),
-			MenuAction("Delete", function() { app.clipboard.delete(); }, {shortcut: 'Delete'}),
-			MenuAction('<hr>', {type: 'separator'}),
-			MenuAction("Find", _=> { app.helpers.finder.init(); dismissActiveMenus(); }, {shortcut: 'Ctrl-F'}),
-			MenuAction('<hr>', {type: 'separator'}),
-			MenuAction("Select All", function() { currentBn.selectAll(); }, {shortcut: 'Ctrl-A'}),
-			Menu({label:"Select", items: [
-				['Root Nodes', 'rootNodes'],
-				['Leaf Nodes', 'leafNodes'],
-				['Arcs', 'arcs'],
-			].map(([label,type]) => MenuAction(label, _=> { currentBn.setSelection(currentBn.findItems(type)); dismissActiveMenus(); }))}),
-		]}),
-		Menu({label:"View", items: [
-			MenuAction('<input type="range" name="viewZoom" min="0.25" max="3" step="0.125" value="1"> <span class="viewZoomText">100%</span>', function(){}),
-			MenuAction("Auto-Layout", function() { app.autoLayout(); dismissActiveMenus(); }, {shortcut: 'Ctrl-Shift-A'}),
-			MenuAction("Auto-Layout (Left to Right)", function() { app.autoLayout(null, {direction: 'LR'}); dismissActiveMenus(); }, {shortcut: 'Ctrl-Shift-A'}),
-			MenuAction(n('span',n('input.fullScreen',{type:'checkbox'})," Full Screen"), _=> {
-				document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
-				//q('input.fullScreen').set({checked: !document.fullscreenElement});
-				dismissActiveMenus();
-			}, {on_show: _=>q('input.fullScreen').set({checked: !!document.fullscreenElement})}),
-			Menu({label: "Nodes", items: [
-				MenuAction('Bare Labels Only', function() { app.changeNodeView('bareLabel'); dismissActiveMenus(); }),
-				MenuAction('Labels Only', function() { app.changeNodeView('label'); dismissActiveMenus(); }),
-				MenuAction('Labels & States Only', function() { app.changeNodeView('labelStates'); dismissActiveMenus(); }),
-				MenuAction('Detailed Nodes', function() { app.changeNodeView('detailed'); dismissActiveMenus(); }),
-				MenuAction('Stacked Bars', function() { app.changeNodeView('stacked'); dismissActiveMenus(); }),
-				MenuAction('<hr>', {type: 'separator'}),
-				MenuAction('Header: ID', function() { app.changeNodeHeader('id'); dismissActiveMenus(); }),
-				MenuAction('Header: Label', function() { app.changeNodeHeader('label'); dismissActiveMenus(); }),
-				MenuAction('Header: Label + ID', function() { app.changeNodeHeader('idLabel'); dismissActiveMenus(); }),
-			]}),
-			Menu({label: 'Spacing', items: [
-				MenuAction('<span class=spaceLabel>Item Spacing:</span> <input type="range" name="viewSpacing" min="0.125" max="3" step="0.125" value="1"> <span class="viewSpacingText">100%</span>', function() {}),
-				MenuAction('<span class=spaceLabel>Horizontal Spacing:</span> <input type="range" name="viewSpacing" data-type="horizontal" min="0.125" max="3" step="0.125" value="1"> <span class="viewSpacingText">100%</span>', function() {}),
-				MenuAction('<span class=spaceLabel>Vertical Spacing:</span> <input type="range" name="viewSpacing" data-type="vertical" min="0.125" max="3" step="0.125" value="1"> <span class="viewSpacingText">100%</span>', function() {}),
-				MenuAction('<hr>', {type: 'separator'}),
-				MenuAction('Insert Square Space', _=> { app.insertSpace('rectangular'); dismissActiveMenus(); }),
-				MenuAction('Insert Horizontal Space', _=> { app.insertSpace('horizontal'); dismissActiveMenus(); }),
-				MenuAction('Insert Vertical Space', _=> { app.insertSpace('vertical'); dismissActiveMenus(); }),
-			]}),
-			MenuAction('<hr>', {type: 'separator'}),
-			MenuAction('<input type="checkbox" class=showArcStrengths> Show Arc Strengths', function() {
-				if ( !$('.showArcStrengths').prop('checked') ) {
-					currentBn.trackArcInfluences();
-					app.updateBN();
-					$('.showArcStrengths').prop('checked', true);
-				}
-				else {
-					currentBn.removeTrackArcInfluences();
-					$('.showArcStrengths').prop('checked', false);
-				}
-			}),
-			Menu({label:"Highlight on Selection", items: [
-				['None', null],
-				['Selection', 'selection'],
-				['Parents', 'parent'],
-				['Children', 'child'],
-				['Parents & Children', 'direct'],
-				['Ancestors', 'ancestor'],
-				['Descendants', 'descendant'],
-				['Markov Blanket', 'markovBlanket'],
-				['D-Connected', 'dconnected'],
-				['Directed Paths (2 nodes)', 'directedPaths'],
-				['D-Connected Paths (2 nodes)', 'dconnectedPaths'],
-				['D-Connected, Indirect (2 nodes)', 'dconnectedIndirect'],
-				['Backdoor Paths', 'backpaths'],
-				['Selection Bias', 'selectionBias'],
-				['Closest Ancestors', 'confounder'],
-				['Closest Descendants', 'collider'],
-				].map(([label, type]) => {
-					return MenuAction(n('span', n('input', {type:'checkbox',class:`highlightOnSelection ${type??'none'}`,checked:type?null:'true'}), label), _=> app.highlightOnSelection(type));
-				})
-			}),
-			MenuAction('Highlight D-Connected Nodes', function() {
-				if ($(".dconnected").length) {
-					$(".dconnected").removeClass("dconnected");
-				}
-				else {
-					/// Find d-connected nodes for all selected nodes (I'm not sure
-					/// this makes much sense)
-					for (var node of currentBn.selected) {
-						//onsole.log('sel:', item);
-						if (node instanceof Node) {
-							var dConnectedNodes = currentBn.findAllDConnectedNodes2(node);
-							for (var i=0; i<dConnectedNodes.length; i++) {
-								var connectedNode = dConnectedNodes[i];
-								$("#display_"+connectedNode.id).addClass("dconnected");
-							}
-						}
-					}
-
-				}
-			}),
-			MenuAction('Toggle BN Description', function() {
-				currentBn.showComment(!$('.sidebar > .comment').is(':visible'), {force:true});
-			}),
-		]}),
-		Menu({label:"Network", items: [
-			MenuAction("Update", function() { app.updateBN(); dismissActiveMenus(); }),
-			Menu({label:"Inference Methods", items: [
-				MenuAction("Off", event => app.setUpdateMethod('off', false, event.target), {type: updateMethodIs.off ? 'checked' : ''}),
-				MenuAction("Likelihood Weighting", event => app.setUpdateMethod('likelihoodWeighting', false, event.target), {type: updateMethodIs.likelihoodWeighting ? 'checked' : ''}),
-				MenuAction("Likelihood Weighting (Worker)", event => app.setUpdateMethod('likelihoodWeighting',true, event.target), {type: updateMethodIs.likelihoodWeightingWorker ? 'checked' : ''}),
-				MenuAction("Junction Tree", event => app.setUpdateMethod('junctionTree', false, event.target), {type: updateMethodIs.junctionTree ? 'checked' : ''}),
-				MenuAction("Junction Tree (Worker)", event => app.setUpdateMethod('junctionTree', true, event.target), {type: updateMethodIs.junctionTreeWorker ? 'checked' : ''}),
-				MenuAction("Auto Select (Worker)", event => app.setUpdateMethod('autoSelect', false, event.target), {type: updateMethodIs.autoSelect ? 'checked' : ''}),
-			]}),
-			MenuAction("Find Good Decisions", function() { app.findGoodDecisions(); dismissActiveMenus(); }),
-			MenuAction('Time Limit: <input type="text" name="timeLimit" value="0">ms', function() { }),
-			MenuAction('# Samples: <input type="text" name="iterations" value="'+BN.defaultIterations+'">', function() { }),
-			Menu({label:"Learn", items: [
-				MenuAction('Add Nodes from File', _=> { app.addNodesFromFile(); dismissActiveMenus(); } ),
-				MenuAction('Parameters: Counting...', function() { app.learnParametersCounting(); dismissActiveMenus(); } ),
-				MenuAction('Parameters: EM...', function() { app.learnParametersEm(); dismissActiveMenus(); } ),
-				MenuAction('Structure: Naive Bayes...', function() { app.learnStructureNaiveBayes(); dismissActiveMenus(); } ),
-				MenuAction('Structure: TAN...', function() { app.learnStructureTan(); dismissActiveMenus(); } ),
-				MenuAction('<hr>', {type: 'separator'}),
-				Menu({label: 'Auto re-parametrise with', type: 'reparameterizeMenu', items: [
-					MenuAction('Choose file...', _=>app.reparamChooseFile()),
-				]}),
-			]}),
-			MenuAction('Flatten Network', function() { app.flattenNetwork(); dismissActiveMenus(); } ),
-			MenuAction('Compare Network...', function() { app.compareNetwork(); dismissActiveMenus(); } ),
-		]}),
-		Menu({label:'Evidence', type:'evidenceMenu', items: [
-			MenuAction('Clear Evidence', function() { app.clearEvidence(); dismissActiveMenus(); } ),
-			MenuAction('Calculate Probability of Evidence', function() { app.showProbabilityOfEvidence(); dismissActiveMenus(); } ),
-			MenuAction('<hr>', {type: 'separator'}),
-			MenuAction('Store Current', function() { app.storeEvidence(); }),
-			MenuAction('<hr>', {type: 'separator'}),
-		]}),
-		Menu({label:"Toolbox", type:'toolboxMenu', items: [
-			Menu({label:"Node", type:'toolboxMenu', items: [
-				MenuAction('Transform Nodes', _=> { app.helpers.transformNodes.init(); dismissActiveMenus(); }),
-			]}),
-			MenuAction('Validate Node by Node', _=> { new EachValidator().setup(); dismissActiveMenus(); }),
-			MenuAction('Treament-Outcome Analysis', _=>{app.helpers.treatmentOutcome.init(); dismissActiveMenus()}),
-			MenuAction('Mutual Information', _=>{app.helpers.mi.init(); dismissActiveMenus()}),
-			MenuAction('Best EV (temporary)', _=>{app.helpers._tempBestEv.init(); dismissActiveMenus()}),
-			MenuAction('Variable Dictionary', _=>{app.helpers.varDict.init(); dismissActiveMenus()}),
-			MenuAction('Network Information', _=>{app.helpers.stats.init(); dismissActiveMenus()}),
-			MenuAction('Compare BN CPTs', _=>{app.helpers.compareCpts.init(); dismissActiveMenus()}),
-			MenuAction('View Junction Tree', _=>{app.helpers.jtree.init(); dismissActiveMenus()}),
-			MenuAction('<hr>', {type: 'separator'}),
-			MenuAction(n('div',n('input', {type:'checkbox', name:'navigateByNode'}), 'Navigate by Node'), _=>{app.helpers.navigateByNode.init(); dismissActiveMenus()}),
-		]}),
-		Menu({label:"(Dev)", type: 'debugMenu', items: [
-			MenuAction(n('span',n('input.cecCheck', {type:'checkbox',checked:mbConfig.jtree.crossEvidenceCaching?'checked':null}), 'Between evidence caching (JTree)'), _=>{
-				mbConfig.jtree.crossEvidenceCaching = !mbConfig.jtree.crossEvidenceCaching;
-				$('.cecCheck').prop('checked', mbConfig.jtree.crossEvidenceCaching);
-			}),
-			MenuAction('# Workers: <input type="text" name="numWorkers" value="2">', function() { }),
-			MenuAction('# Perf Loops: <input type="text" name="perfLoops" value="100">', function() { }),
-			MenuAction('# Perf Samples: <input type="text" name="perfIterations" value="10000">', function() { }),
-			MenuAction('Perf Check Local', function() { currentBn.perfCheck(); }),
-			MenuAction('Perf Check Worker', function() { currentBn.perfCheckWorker(); }),
-			MenuAction("Load Data...", function(){ $('#openDataFile').change(function() {
-				app.readChosenFile(this, (fileData,fileName) => app.loadData(fileData, {fileName}));
-			}).click(); dismissActiveMenus(); }),
-			MenuAction("GUI Testing...", _=>{ testing.init(); dismissActiveMenus(); }),
-			MenuAction(n('span', n('input.alosCheck', {type:'checkbox',checked:app.autoLayoutOnStructure?'checked':null}), 'Auto-Layout On Structure'), _=>{
-				app.autoLayoutOnStructure = !app.autoLayoutOnStructure;
-				$('.alosCheck').prop('checked', app.autoLayoutOnStructure);
-				app.alosFunc ??= _=>{
-					app.autoLayout();
-				};
-				if (app.autoLayoutOnStructure) {
-					currentBn.addListener('structureChange', app.alosFunc);
-				}
-				else {
-					currentBn.removeListener('structureChange', app.alosFunc);
-				}
-			}),
-			MenuAction('<hr>', {type: 'separator'}),
-			Menu({label:'Themes', items: [
-				MenuAction(n('div',
-					n('input', {type: 'radio', name: 'menuTheme', value: ''}),
-					'Original'
-				), _=> {app.setTheme(null); dismissActiveMenus(); }),
-				MenuAction(n('div',
-					n('input', {type: 'radio', name: 'menuTheme', value: 'netica'}),
-					'Netica'
-				), _=> {app.setTheme('netica'); dismissActiveMenus(); }),
-				MenuAction(n('div',
-					n('input', {type: 'radio', name: 'menuTheme', value: 'genie'}),
-					'GeNIe'
-				), _=> {app.setTheme('genie'); dismissActiveMenus(); }),
-			]}),
-		]}),
-		Menu({label:"Help", items: [
-			MenuAction('Keyboard Shortcuts', function() { app.showShortcuts(); }),
-			MenuAction('About Make-Believe', function() { app.about(); }),
-		]}),
-	]});
-
-	$("body").prepend(app.menu.make());
-	
-	let theme = localStorage.getItem('theme');
-	app.setTheme(theme);
-	
-	stormy.on('startup', function(available) {
-		if (available) {
-			var ma = MenuAction("Save As...", function(){ app.saveAsFile(); dismissActiveMenus(); }, {shortcut: 'Ctrl-Alt-S'});
-			$('.bar.menu .saveItem')
-				.after(ma.make())
-				.find('.label').text('Save');
-		}
-	});
-
-	/// Setup initial keyboard shortcuts (these can be overriden after the fact)
-	Object.assign(app.keyboardShortcuts, app.menu.collectShortcuts());
-	let isShortcutKeyDown = false;
-	$(document).on('keydown', function(event) {
-		if (isShortcutKeyDown)  return;
-		if (!$(event.target).is('textarea, input, select, [contenteditable]')) {
-			/// Make hash from event
-			var keyHash = (event.ctrlKey?'Ctrl-':'')
-				+ (event.altKey?'Alt-':'')
-				+ (event.shiftKey?'Shift-':'')
-				+ (event.metaKey?'Meta-':'')
-				+ event.key[0].toUpperCase()+event.key.slice(1);
-			//onsole.log(keyHash);
-			if (app.keyboardShortcuts[keyHash]) {
-				isShortcutKeyDown = true;
-				event.preventDefault();
-				app.keyboardShortcuts[keyHash].action();
-				return false;
-			}
-		}
-	});
-	$(document).on('keyup', function(event) {
-		isShortcutKeyDown = false;
-	});
-
-	/** Evidence **/
-	$(".bnview").on("mousedown", ".stateName, .beliefBar", function(event) {
-		if (event.originalEvent && event.originalEvent.button != 0)  return;
-		var nodeId = $(this).closest(".node").attr("id").replace(/^display_/, '');
-		var node = currentBn.nodesById[nodeId];
-		var stateI = node.statesById[$(this).closest('.state').find('.stateName').text()].index;
-		if (node.dynamic) {
-			var checks = "";
-			var selectStr = "<select>";
-			selectStr += "<option value=-1>(not set)</option>";
-			for (var i=0; i<node.states.length; i++) {
-				selectStr += "<option value="+i+">"+node.states[i].id+"</option>";
-			}
-			selectStr += "</select>";
-			for (var i=0; i<10; i++) {
-				checks += "<div class='timestep time"+i+"'>"+selectStr+"</div>";
-			}
-			dialog.popup("Please specify the evidence for each time slice:"
-				+checks
-				+"<div class=controls><button type=button class='okButton'>OK</button></div>");
-			var t = 0;
-			$(".dialog .timestep").each(function() {
-				var e = currentBn.evidence[nodeId+(t==0?"":"_"+t)];
-				if (e !== undefined)  $(this).find("select").val( e );
-				t++;
-			});
-			$(".dialog .okButton").one("click", function() {
-				var t = 0;
-				$(".dialog").find(".timestep").each(function() {
-					var timeStepVal = $(this).find("select").val();
-					console.log(timeStepVal, $(this).find("select").text());
-
-					if (timeStepVal == -1) {
-						delete currentBn.evidence[nodeId+(t==0?"":"_"+t)];
-					}
-					else {
-						currentBn.evidence[nodeId+(t==0?"":"_"+t)] = Number(timeStepVal);
-					}
-					t++;
-				});
-				dialog.dismissAll();
-				currentBn.updateAndDisplayBeliefs();
-			});
-		}
-		else {
-			if (typeof(currentBn.evidence[nodeId])!="undefined") {
-				/// Remove the evidence
-				var isNewState = currentBn.evidence[nodeId] != stateI;
-				delete currentBn.evidence[nodeId];
-				/// Set new evidence
-				if (isNewState) {
-					currentBn.evidence[nodeId] = stateI;
-				}
-				/// Remove visual indicator of evidence if no new evidence
-				else {
-					$("#display_"+nodeId).removeClass("hasEvidence");
-				}
-			}
-			else {
-				/// Save the evidence
-				currentBn.evidence[nodeId] = stateI;
-
-				/// Update display
-				$("#display_"+nodeId).addClass("hasEvidence");
-			}
-			app.updateBN();
-		}
-		currentBn.notifyEvidenceChanged();
-	});
-	
-	/** Move current canvas around **/
-	makeDraggable(q('.bnmidview'));
-	
-	/** Item movement **/
-	/** (and a little item selection) **/
-	var mx = 0, my = 0;
-	var disableSelect = 0;
-	/// For aligning things when moving them
-	var snapOn = true;
-	var snapGridSize = 5;
-	$(".bnview").on("mousedown touchstart", ".node h6, .submodel:not(.parent), .textBox", function(event) {
-		if (event.button!=0)  return;
-		if (event.target.closest('.editMode'))  return;
-		let getOffset = el => ({left: el.offsetLeft, top: el.offsetTop});
-		if (!event.originalEvent.touches)  event.preventDefault();
-		if (event.which > 1)  return;
-		mx = event.originalEvent.pageX ?? event.originalEvent.touches[0].pageX;
-		my = event.originalEvent.pageY ?? event.originalEvent.touches[0].pageX;
-		//onsole.log("mousedown:", mx, my);
-		var $item = $(this).closest(".node, .submodel, .textBox");
-		var o = getOffset($item[0]);
-		// var scale = Math.round($item[0].offsetWidth)/Math.round($item[0].getBoundingClientRect().width);
-		var scale = 1/parseFloat($('.bnview').css('zoom'));
-		disableSelect = 2;
-
-		let focusedItem = currentBn.findItem($item[0]);
-		/// Set the selection to the current item if it's outside of the current selection OR the altKey is pressed (which toggles selections)
-		if (!currentBn.selected.has(focusedItem) || event.shiftKey) {
-			currentBn.setSelection([focusedItem], {add: false, toggle: event.shiftKey});
-		}
-		var selectedOffsets = new Map();
-		var selectedGraphItems = [];
-		for (var item of currentBn.selected) {
-			if (item.displayItem) {
-				if (item.isGraphItem())  selectedGraphItems.push(item);
-				selectedOffsets.set(item, getOffset($(`#display_${item.id}`)[0]));
-			}
-		}
-
-		/// Get the width/height if the mousedown node was not part of the network
-		var maxX = 0, maxY = 0;
-		var graphItems = currentBn.getGraphItems();
-		let {internalArcs, crossingArcs} = currentBn.getSelectedArcs();
-		var hAlignItems = [];
-		var vAlignItems = [];
-		for (var i=0; i<graphItems.length; i++) {
-			var graphItem = graphItems[i];
-			if (graphItem.isHidden && graphItem.isHidden())  continue;
-			if (("display_"+graphItem.id)==$item.attr("id"))  continue;
-			var $graphItem = $("#display_"+graphItem.id);
-			var n = draw.getBox($graphItem, true);
-			maxX = Math.max(maxX, n.x+n.width);
-			maxY = Math.max(maxY, n.y+n.height);
-			if (currentBn.selected.has(graphItem))  continue;
-			if (snapOn) {
-				var $op = $graphItem.offsetParent();
-				let op = $op[0];
-				/// Prefer center alignments, to top/bottom
-				hAlignItems.push([n.y+n.height/2,n,graphItem,"center"]);
-				hAlignItems.push([n.y,n,graphItem,"top"]);
-				hAlignItems.push([n.y+n.height,n,graphItem,"bottom"]);
-				vAlignItems.push([n.x+n.width/2,n,graphItem,"center"]);
-				vAlignItems.push([n.x,n,graphItem,"left"]);
-				vAlignItems.push([n.x+n.width,n,graphItem,"right"]);
-			}
-		}
-		/// ALSO add split points that are: 1) on arcs that cross the selection boundary
-		/// and 2) only the nearest split point (since other's aren't involved in alignment)
-		for (let crossingArc of crossingArcs) {
-			let arcPathData = crossingArc.path.getPathData();
-			if (arcPathData.length <= 2)  continue;
-			let [parent,child] = crossingArc.getEndpoints();
-			let snapSplitPoint = arcPathData[1];
-			if (currentBn.selected.has(child)) {
-				snapSplitPoint = arcPathData[arcPathData.length-2];
-			}
-			
-			
-			hAlignItems.push([snapSplitPoint.values[1], null, null, "center"]);
-			vAlignItems.push([snapSplitPoint.values[0], null, null, "center"]);
-		}
-
-		var newLeft = null;
-		var newTop = null;
-		let lastDeltaX = 0;
-		let lastDeltaY = 0;
-		$(".bnouterview").on("mousemove touchmove", function(event) {
-			event.preventDefault();
-			$(".hAlignLine").hide();
-			$(".vAlignLine").hide();
-			$(".aligning").removeClass("aligning");
-			var nmx = event.originalEvent.pageX ?? event.originalEvent.touches[0].pageX;
-			var nmy = event.originalEvent.pageY ?? event.originalEvent.touches[0].pageY;
-			//onsole.log("mousemove:", nmx, nmy, {left: o.left + (nmx - mx), top: o.top + (nmy - my)});
-			/// Move the DOM object, but not the net object yet
-			newLeft = o.left + (nmx - mx)*scale;
-			newTop = o.top + (nmy - my)*scale;
-			// console.log(newLeft, nmx, mx, (nmx-mx), scale);
-			if (snapOn) {
-				/// XXX I Should refactor to make this slimmer/more code reuse
-				/// Find something to align with if possible
-				for (var i=0; i<hAlignItems.length; i++) {
-					var otherItem = hAlignItems[i];
-					var halfHeight = $item.outerHeight()/2;
-					if (otherItem[3]=="center" && Math.floor(otherItem[0]/snapGridSize)==Math.floor((newTop+halfHeight)/snapGridSize)) {
-						newTop = otherItem[0]-halfHeight;
-						if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
-						if (!$(".hAlignLine").length)  $("<div class=hAlignLine>").appendTo(".bnview");
-						$(".hAlignLine").show()[0].style.top = (newTop+halfHeight)+'px';
-						break;
-					}
-					else if (Math.floor(otherItem[0]/snapGridSize)==Math.floor(newTop/snapGridSize)) {
-						newTop = otherItem[0];
-						if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
-						if (!$(".hAlignLine").length)  $("<div class=hAlignLine>").appendTo(".bnview");
-						$(".hAlignLine").show()[0].style.top = (newTop)+'px';
-						break;
-					}
-					else if (Math.floor(otherItem[0]/snapGridSize)==Math.floor((newTop+$item.outerHeight())/snapGridSize)) {
-						newTop = otherItem[0]-$item.outerHeight();
-						if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
-						if (!$(".hAlignLine").length)  $("<div class=hAlignLine>").appendTo(".bnview");
-						$(".hAlignLine").show()[0].style.top = (newTop+$item.outerHeight())+'px';
-						break;
-					}
-				}
-				/// Find something to align with if possible
-				for (var i=0; i<vAlignItems.length; i++) {
-					var otherItem = vAlignItems[i];
-					var halfWidth = $item.outerWidth()/2;
-					/*console.log(otherItem[3], Math.floor(otherItem[0]/snapGridSize), "snaps",
-						Math.floor((newLeft+halfWidth)/snapGridSize),
-						Math.floor(newLeft/snapGridSize),
-						Math.floor((newLeft+$item.outerWidth())/snapGridSize),
-					);*/
-					if (otherItem[3]=="center" && Math.floor(otherItem[0]/snapGridSize)==Math.floor((newLeft+halfWidth)/snapGridSize)) {
-						newLeft = otherItem[0]-halfWidth;
-						if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
-						if (!$(".vAlignLine").length)  $("<div class=vAlignLine>").appendTo(".bnview");
-						$(".vAlignLine").show()[0].style.left = (newLeft+halfWidth)+'px';
-						break;
-					}
-					else if (Math.floor(otherItem[0]/snapGridSize)==Math.floor(newLeft/snapGridSize)) {
-						newLeft = otherItem[0];
-						if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
-						if (!$(".vAlignLine").length)  $("<div class=vAlignLine>").appendTo(".bnview");
-						$(".vAlignLine").show()[0].style.left = (newLeft)+'px';
-						break;
-					}
-					else if (Math.floor(otherItem[0]/snapGridSize)==Math.floor((newLeft+$item.outerWidth())/snapGridSize)) {
-						newLeft = otherItem[0]-$item.outerWidth();
-						if (otherItem[2])  $("#display_"+otherItem[2].id).addClass("aligning");
-						if (!$(".vAlignLine").length)  $("<div class=vAlignLine>").appendTo(".bnview");
-						$(".vAlignLine").show()[0].style.left = (newLeft+$item.outerWidth())+'px';
-						break;
-					}
-				}
-			}
-			/// Scale can muck up the alignment lines (sure, these probably shouldn't
-			/// be in the div that gets scaled)
-			
-			// $('.hAlignLine').css('width', (scale*100)+'%');
-			// $('.vAlignLine').css('height', (scale*100)+'%');
-			$item[0].style.left = (newLeft)+'px';
-			$item[0].style.top = (newTop)+'px';
-			//$item.offset({left: newLeft, top: newTop});
-			let deltaX = newLeft - o.left;
-			let deltaY = newTop - o.top;
-			var curMaxX = maxX, curMaxY = maxY;
-			for (var selItem of currentBn.selected) {
-				if (selItem.displayItem) {
-					var $selItem = $(`#display_${selItem.id}`);
-					if (!$selItem.is($item)) {
-						var sItem = selectedOffsets.get(selItem);
-						$selItem[0].style.left = ( sItem.left + deltaX )+'px';
-						$selItem[0].style.top = ( sItem.top + deltaY )+'px';
-					}
-				}
-			}
-			let moveDeltaX = deltaX - lastDeltaX;
-			let moveDeltaY = deltaY - lastDeltaY;
-			//onsole.log(moveDeltaX, moveDeltaY);
-			var {maxX: curMaxX, maxY: curMaxY} = currentBn.redrawArcs(selectedGraphItems, curMaxX, curMaxY, {moved: {deltaX: moveDeltaX, deltaY: moveDeltaY}});
-			lastDeltaX = deltaX;
-			lastDeltaY = deltaY;
-			//for (var key in
-			var n = currentBn.getGraphItemById($item.attr("id").replace(/^display_/,""));
-			/// What's being moved is now always selected, so following not needed
-			//if (n.pathsIn)  currentBn.redrawArcs(n, curMaxX, curMaxY);
-			disableSelect = 3;
-		});
-		$(".bnouterview").on("mouseup touchend", function(event) {
-			$(".hAlignLine").hide();
-			$(".vAlignLine").hide();
-			$(".aligning").removeClass("aligning");
-			/// Update position of the node
-			if (newLeft !== null) {
-				var nmx = event.originalEvent.pageX ?? event.originalEvent.changedTouches[0].pageX;
-				var nmy = event.originalEvent.pageY ?? event.originalEvent.changedTouches[0].pageX;
-				//onsole.log("mouseup:", nmx, nmy, {left: o.left + (nmx - mx), top: o.top + (nmy - my)});
-				//$item.offset({left: newLeft, top: newTop});
-
-				/// Now it's final, update the net object
-				var n = currentBn.getGraphItemById($item.attr("id").replace(/^display_/,""));
-				var bn = n.net
-				var dLeft = newLeft - o.left;
-				var dTop = newTop - o.top;
-				
-				
-				var els = document.elementsFromPoint(event.clientX ?? event.changedTouches[0].clientX, event.clientY ?? event.changedTouches[0].clientY);
-				var submodel = els.find(el => el.matches('.submodel') && $(el).data('submodel').id != n.id);
-				submodel = $(submodel).data('submodel');
-				if (submodel) {
-					var n = submodel.net.getGraphItemById($item.attr("id").replace(/^display_/,""));
-					let net = submodel.net;
-					net.changes.doCombined(_=>{
-						n.guiMoveToSubmodel( submodel );
-						for (var item of currentBn.selected) {
-							//onsole.log(node.id, submodel.id);
-							item.guiMoveToSubmodel( submodel );
-							//Not sure what the following was supposed to do
-							//selectedOffsets[node]
-						}
-					});
-					net.guiUpdateAndDisplayForLast();
-					net.clearSelection();
-				}
-				else {
-					var oldPos = {x: n.pos.x, y: n.pos.y};
-					var newPos = {x: n.pos.x+dLeft, y: n.pos.y+dTop};
-					/// Make array
-					var items = [...currentBn.selected].filter(node => node.id != n.id);
-					var itemPos = items.map(item => Object.assign({}, item.pos));
-					var newItemPos = itemPos.map(pos => ({x: pos.x+dLeft, y: pos.y+dTop}));
-					
-					bn.changes.doCombined(_=> {
-						n.moveTo(newPos.x, newPos.y);
-						items.forEach((item,i) => {
-							item.moveTo(newItemPos[i].x, newItemPos[i].y);
-						});
-					});
-				}
-
-			}
-			$(".bnouterview").unbind("mousemove touchmove").unbind("mouseup touchend");
-			
-
-			disableSelect -= 1;
-		});
-	});
-	
-	/// Move by keyboard
-	let keyMoveKeyup = null;
-	let savedItemPos = null;
-	document.addEventListener('keydown', event => {
-		console.log('x');
-		if (currentBn.selected.size && !event.target.matches('textarea, input, select, [contenteditable]')
-				&& ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)) {
-			if (!keyMoveKeyup) {
-				/// Save all item positions on first key down
-				savedItemPos = [...currentBn.selected].map(item => [item,Object.assign({},item.pos)]);
-				document.addEventListener('keyup', keyMoveKeyup = event => {
-					/// Collect new positions
-					newItemPos = [...currentBn.selected].map(item => [item,Object.assign({},item.pos)]);
-					/// Restore item positions before setting them undoably
-					savedItemPos.forEach(([item,pos]) => Object.assign(item.pos, pos));
-					currentBn.changes.doCombined(_=> {
-						/// Set undoably
-						newItemPos.forEach(([item,pos]) => item.moveTo(pos.x, pos.y));
-					});
-					if (currentBn.changes.lastAction()?.type == 'ItemMove') {
-						/// Coalesce all ItemMoves (not particularly efficiently)
-						currentBn.changes.linkToPrevious();
-					}
-					document.removeEventListener('keyup', keyMoveKeyup);
-					keyMoveKeyup = null;
-				});
-			}
-			for (let item of currentBn.selected) {
-				let dx = 0, dy = 0;
-				if      (event.key == 'ArrowRight')  dx = 10;
-				else if (event.key == 'ArrowLeft')  dx = -10;
-				else if (event.key == 'ArrowUp')  dy = -10;
-				else if (event.key == 'ArrowDown')  dy = 10;
-				if (event.ctrlKey) { dx*=3; dy*=3; }
-				if (event.shiftKey) { dx*=0.2; dy*=0.2; }
-				item.moveTo(item.pos.x+dx, item.pos.y+dy, false);
-			}
-		}
-	});
-
-	/** Select multiple objects (currently only includes nodes) **/
-	$(".bnmidview").on('mousedown', function(event) {
-		if (event.button!=0)  return;
-		if (!$(event.target).closest('.item').length) {
-			if (!event.shiftKey && !event.altKey && event.button==0 && !event.target.closest('.menu'))  currentBn.clearSelection();
-			var turnOn = !event.altKey ? true : false;
-			var view = $('.bnmidview').offset();
-			var {pageX: origX, pageY: origY} = event;
-			var $rectSelect = $('<div class=rectSelect>')
-				.css({top: origY - view.top, left: origX - view.left, display: 'none'})
-				.appendTo('.bnmidview');
-			event.preventDefault();
-			$(window).on('mousemove.rectSelect', function(event) {
-				var {pageX: curX, pageY: curY} = event;
-				$rectSelect.css({
-					top: (curY < origY ? curY : origY) - view.top, left: (curX < origX ? curX : origX) - view.left,
-					width: Math.abs(curX - origX), height: Math.abs(curY - origY), display: 'block'});
-			}).on('mouseup.rectSelect', function(event) {
-				/// Which items are contained in the rectangle?
-				//var rect = Object.assign($rectSelect.offset(), {width: $rectSelect.width(), height: $rectSelect.height()});
-				var rect = $rectSelect[0].getBoundingClientRect();
-				$('.bnview .item').each(function() {
-					//var item = Object.assign($(this).offset(), {width: $(this).width(), height: $(this).height()});
-					var item = this.getBoundingClientRect();
-					//onsole.log(item, rect);
-					if (rect.top <= item.top && item.top+item.height <= rect.top+rect.height
-							&&
-							rect.left <= item.left && item.left+item.width <= rect.left+rect.width) {
-						console.log('hit');
-						currentBn.findItem(this).guiToggleSelect({on:turnOn});
-					}
-				});
-				$(window).off('.rectSelect');
-				/// This interferes with other double-click events in Chrome if it's not executed
-				/// outside the current event loop.
-				setTimeout(_=> $rectSelect.remove(), 0);
-			});
-		}
-	});
-
-	/** Arc drawing. Yay! **/
-	var startNode = null;
-	var DCTIMEOUT = 200; //ms
-	var timerId = null;
-	var singleClick = true;
-	$(".bnview").on("mousedown touchstart", ".node .hotSpot, .node .hotSpotReverse", function(event) {
-		event.pageX ??= event.touches[0].pageX;
-		event.pageY ??= event.touches[0].pageY;
-		//$('.bnview').css('touch-action', 'none');
-		/// XXX: Fix, make better way of handling scale!
-		let $item = currentBn.getGraphItems()[0].el();
-		var scale = Math.round($item[0].offsetWidth)/Math.round($item[0].getBoundingClientRect().width);
-		
-		$('body').addClass('disableSelections');
-		if ($(event.target).closest('h6').length)  return;
-		console.log('mousedown');
-		if (singleClick || timerId !== null) {
-			if (!singleClick) {
-				/// We have a double-click, so clear the clock
-				clearTimeout(timerId); timerId = null;
-				event.preventDefault();
-			}
-
-			var $node = $(event.target).closest('.node');
-			startNode = currentBn.find($node);
-
-			var ncs = $(".netSvgCanvas").offset();
-			var sourcePoint = {x: event.pageX*scale - ncs.left, y: event.pageY*scale - ncs.top};
-			var destPoint = {x: sourcePoint.x, y: sourcePoint.y};
-			var sourceBox = draw.getBox($node);
-			var destBox = {x: sourceBox.x, y: sourceBox.y, width: 1, height: 1, borderRadius: 0};
-			var par = sourceBox;
-			var child = destBox;
-			var $arc = null;
-			var arcDirection = 0; /// 0 means left/down, 1 means right/up
-			var origCanvas = {width: $(".netSvgCanvas").width(), height:$(".netSvgCanvas").height()};
-			
-			/// If we're creating a parent (hotSpotReverse), switch around par/child
-			if ($(event.target).is('.hotSpotReverse')) {
-				par = destBox;
-				child = sourceBox;
-				arcDirection = 1;
-			}
-
-			var exitSide = null;
-			function tempMouseMove(event) {
-				event = event.originalEvent;
-				event.preventDefault();
-				event.pageX ??= event.touches[0].pageX;
-				event.pageY ??= event.touches[0].pageY;
-				destPoint.x = event.pageX - ncs.left;
-				destPoint.y = event.pageY - ncs.top;
-				/*if (!exitSide) {
-					/// If first time out of box. Which side did we exit?
-					var exitSideCheck = destPoint.x < sourceBox.x ? "left" :
-						destPoint.x > sourceBox.x + sourceBox.width ? "right" :
-						destPoint.y < sourceBox.y ? "top" :
-						destPoint.y > sourceBox.y + sourceBox.height ? "bottom" :
-						null;
-					console.log(exitSideCheck);
-					if (!exitSideCheck) {
-						return;
-					}
-					exitSide = exitSideCheck;
-					/// Depending on how we start pulling out the arrow, make
-					/// it a child (right or bottom) or parent (left or up)
-					if (exitSide == "left" || exitSide == "top") {
-						par = destBox;
-						child = sourceBox;
-						arcDirection = 1;
-					}
-				}*/
-				/// Draw arrow to this point
-				destBox.x = (event.pageX - $(".netSvgCanvas").offset().left)*scale;
-				destBox.y = (event.pageY - $(".netSvgCanvas").offset().top)*scale;
-				/// FIX: Obviously don't want to draw a new arrow all the time!
-				if (!$arc) {
-					$arc = draw.drawArrowBetweenBoxes($('.netSvgCanvas'), par, child, {clickable: false});
-					//onsole.log($arc.attr('d'), par, child);
-				}
-				else {
-					draw.drawArrowBetweenBoxes($arc, par, child, {clickable: false});
-					//onsole.log($arc.attr('d'), par, child);
-				}
-				/// Update max x/y as extents for canvas if necessary
-				var b = draw.getBox($arc);
-				//onsole.log("ARC BOX:", b, $arc);
-				var maxX = Math.max(origCanvas.width, (b.x+b.width)*scale);
-				var maxY = Math.max(origCanvas.height, (b.y+b.height)*scale);
-				//onsole.log(maxX, maxY);
-				if (maxX != origCanvas.width || maxY != origCanvas.height) {
-					// $(".netSvgCanvas").attr("width", maxX).attr("height", maxY);
-					draw.resizeCanvas($(".netSvgCanvas"), maxX, maxY);
-				}
-			}
-
-			$(window).on("mousemove touchmove", tempMouseMove);
-
-			/// We bind to window, so that *any* mouseup event (even outside of window)
-			/// clears the startNode
-			$(window).one("mouseup touchend", function(event) {
-				event.pageX ??= event.changedTouches[0].pageX;
-				event.pageY ??= event.changedTouches[0].pageY;
-				event.target = event.changedTouches ? document.elementFromPoint(event.changedTouches[0].clientX,event.changedTouches[0].clientY) : event.target;
-				console.log(event, event.target);
-				$('body').removeClass('disableSelections');
-				if (!singleClick)  event.preventDefault();
-				$(window).unbind("mousemove touchmove", tempMouseMove);
-				/// The mouseup event needs to be from the left-click,
-				/// not a right-click (or middle-click), which would cancel the drag
-				if (startNode && (event.which == 1 || event.changedTouches)) {
-					let $node = $(event.target).closest('.node');
-					let $submodel = $(event.target).closest('.submodel');
-					function addToNode(endNode) {
-						/// Check that the arc is valid
-						if ($arc)  $arc.remove();
-						if (!startNode.wouldBeCycle(endNode,arcDirection)) {
-							if (arcDirection==1) {
-								startNode.guiAddParents([endNode]);
-							}
-							else {
-								endNode.guiAddParents([startNode]);
-							}
-							currentBn.guiUpdateAndDisplayForLast();
-						}
-						else {
-							return false;
-						}
-						return true;
-					}
-					if ($node.length) {
-						let endNode = currentBn.find($node);
-						/// If endNode is in a selection, add to all selected
-						if (currentBn.selected.size && currentBn.selected.has(endNode)) {
-							let numCycles = 0;
-							for (let node of currentBn.selected) {
-								numCycles += !addToNode(node);
-							}
-							if (numCycles>0) {
-								dialog.error(`Could not add ${numCycles} arcs as ${numCycles==1?'it would create a cycle':'they would create cycles'}.<br>(And making DBNs not supported yet.)`);
-							}
-						}
-						/// If endNode is single node, add directly to it
-						else {
-							if (!addToNode(endNode)) {
-								dialog.error('Cannot add arc as it would create a cycle.<br>(And making DBNs not supported yet.)');
-							}
-						}
-					}
-					else if ($submodel.length) {
-						if ($arc)  $arc.remove();
-						let thisStartNode = startNode;
-						let submodel = currentBn.find($submodel);
-						let descendants = thisStartNode.getDescendants();
-						let ancestors = thisStartNode.getAncestors();
-						let nodes = n('ul');
-						let subNodes = submodel.getAllNodes()
-							.filter(n =>
-								/// Don't link to children or parents
-								!n.children.includes(thisStartNode) && !n.parents.includes(thisStartNode)
-								/// Don't parent link to descendants, or child link to ancestors
-								&& !(arcDirection==1 ? descendants.includes(n) : ancestors.includes(n))
-								/// And don't link to myself!
-								&& n != thisStartNode
-							);
-						subNodes = currentBn.topologicalSort(subNodes);
-						//subNodes.sort((a,b) => a.id < b.id ? -1 : 1);
-						subNodes.stableSort((a,b) => a.getSubmodelPathStr() <= b.getSubmodelPathStr() ? -1 : 1);
-
-						let lastNode = null;
-						for (let node of subNodes) {
-							if (!lastNode) {
-								nodes.appendChild( n('h3', node.getSubmodelPathStr()) );
-							}
-							else if (lastNode && node.getSubmodelPathStr() != lastNode.getSubmodelPathStr()) {
-								nodes.appendChild( n('h3', node.getSubmodelPathStr()) );
-							}
-							let li = n('li',
-								n('a', node.id, {href: 'javascript:void(0)', 'data-node-id': node.id, on:{click(event) {
-									let endNode = currentBn.find( $(event.target).data('nodeId') );
-									if (arcDirection==1) {
-										thisStartNode.guiAddParents([endNode]);
-									}
-									else {
-										endNode.guiAddParents([thisStartNode]);
-									}
-									currentBn.guiUpdateAndDisplayForLast();
-									dialog.dismissAll();
-								}}})
-							);
-							nodes.appendChild(li);
-							lastNode = node;
-						};
-						dialog.popup([`Select the node you wish to be the child:`, nodes], {buttons:[
-							n('button', 'Cancel', {type:'button', on:{click:dialog.dismissAll}}),
-						]});
-					}
-					/// Make a new node especially
-					else {
-						var i = 0;
-						while (currentBn.nodesById["node"+i]) i++;
-						if (!$(event.target).closest('.graphItem').length) {
-							/// Remove the arc we were using temporarily
-							if ($arc)  $arc.remove();
-							var nsc = $('.netSvgCanvas').offset();
-							let dropX = (event.pageX - nsc.left)*scale;
-							let dropY = (event.pageY - nsc.top)*scale;
-							newNode = currentBn.guiAddNode("node"+i, ["true","false"], {
-								cpt:[.5,.5],
-								pos: {x: dropX, y: dropY},
-								submodelPath: currentBn.currentSubmodel,
-							});
-							/// Position it correctly
-							let nodeBox = draw.getBox(newNode.el());
-							let tempX = newNode.pos.x - nodeBox.width/2;
-							let tempY = newNode.pos.y - nodeBox.height/2;
-							newNode.el().css({left: tempX, top: tempY});
-							let endPoints = draw.computeArrowBetweenBoxes(currentBn.outputEl, draw.getBox(newNode.el()), draw.getBox(startNode.el()));
-							let newX = tempX - (endPoints[0].x - dropX);
-							let newY = tempY - (endPoints[0].y - dropY);
-							newNode.apiMoveTo(newX, newY);
-							newNode.el().css({left: newX, top: newY});
-							if (arcDirection==1) {
-								startNode.guiAddParents([newNode]);
-							}
-							else {
-								newNode.guiAddParents([startNode]);
-							}
-							currentBn.changes.linkToPrevious();
-							currentBn.guiUpdateAndDisplayForLast(null, _=> {
-								$('#display_'+newNode.id+' h6').map(function() { currentBn.findItem(this).lightNodeEdit()})
-							});
-						}
-						//event.preventDefault();
-						//return false;
-					}
-				}
-				startNode = null;
-			}).one("click", function(event) {
-				if (event.which != 1) {
-					if (!singleClick)  event.preventDefault();
-				}
-			});
-		}
-		else {
-			/// Start the clock for the next click
-			timerId = setTimeout(function() {
-				/// If no second click, clear the clock
-				timerId = null;
-			}, DCTIMEOUT);
-		}
-	}).on('mouseup', '.node', function() {
-		console.log('mouseup');
-	});
-
-	/// Having slightly weird problem in Firefox (maybe others too --- maybe jquery?), where 'click' is being
-	/// triggered, even though mouseup occurs in different place. If this is temporary, revert
-	/// to the 'click' version.
-	if (0) {$(".bnview").on("mousedown", function(event) {
-		$('.bnview').one('mouseup', function(event2) {
-			/// ONLY CLEAR SELECTION IF:
-			///  - no item under the cursor
-			///  - shift key not depressed
-			if (event.target.closest('.item') || event.shiftKey)  return;
-			if (event.pageX == event2.pageX && event.pageY == event2.pageY) {
-				currentBn.clearSelection();
-				if (!$(event.target).closest(document.activeElement).length) {
-					document.activeElement.blur();
-				}
-			}
-		});
-	});}
-	/* Reenable (and update) following once working properly:
-
-	$(".bnview").on("click", function(event) {
-		for (var nodeId in currentBn.selected) {
-			currentBn.nodesById[nodeId].guiToggleSelect();
-		}
-	});
-	*/
-
-	if (0){
-	/// This prevents the 'clearSelection' from triggering, when we don't want it
-	/// (If I revert to just 'click', rather than mousedown/up for clearSelection,
-	/// I need to change, obviously.)
-	$('.bnview').on('mousedown', '.node h6, .submodel, .textBox, .dependencyClickArea', function(event) {
-		event.stopPropagation();
-	});
-
-	/** Select items (if changing, make sure to update the clearSelection prevention above) **/
-	$(".bnview").on("click", ".node h6, .submodel, .textBox", function(event) {
-		//onsole.log("dis:",disableSelect);
-		disableSelect -= 1;
-		if (disableSelect) { disableSelect -= 1; return; }
-		var itemId = $(this).closest(".item")[0].id.replace(/^display_/, '');
-
-		if (event.ctrlKey) {
-			currentBn.find(itemId).guiToggleSelect(false);
-		}
-		else {
-			currentBn.clearSelection();
-			currentBn.find(itemId).guiToggleSelect(true);
-		}
-	});
-	}
-
-	$(document).on('keydown', function(event) {
-		var $t = $(event.target);
-		if (!$t.closest('.node, .submodel, .text, input, select, textarea, [contenteditable]').length) {
-			if (event.key == "Delete") {
-				currentBn.changes.startCombined();
-				for (var item of currentBn.selected) {
-					item.guiDelete();
-					currentBn.selected.delete(item);
-				}
-				currentBn.changes.endCombined();
-				currentBn.guiUpdateAndDisplayForLast();
-			}
-		}
-	});
-
-	/** This needs to change **/
-	$(".bnview").on("dblclick", ".textBox", function(event) {
-		var $textBox = $(this);
-		var textBox = currentBn.getItem(this);
-		event.preventDefault();
-		event.stopPropagation();
-		textBox.guiEdit();
-	});
-
-	/// Submodel navigation
-	$(".bnview").on("dblclick", ".submodel", function() {
-		let submodelToView = $(this).data("submodel").submodelPath.concat($(this).data("submodel").id ? [$(this).data("submodel").id] : []);
-		currentBn.guiOpenSubmodel(submodelToView);
-		currentBn.clearSelection();
-		return false;
-	});
-
-	/// Double click selections cause all sorts of grief :(
-	/// This cancels them for non-editable elements
-	document.addEventListener('mousedown', function (event) {
-		if ($(event.target).is('input,select,textarea,[contenteditable]'))  return;
-		if (event.detail > 1) {
-			event.preventDefault();
-		}
-	}, false);
-	$(".bnview").on("dblclick", function(event) {
-		/// Only trigger in blank areas
-		if (!$(event.target).is(".bnview") && !$(event.target).is(".netSvgCanvas"))  return;
-		/*
-		var i = 0;
-		while (currentBn.nodesById["node"+i]) i++;
-		if ($(event.target).is(".bnview") || $(event.target).is(".netSvgCanvas")) {
-			var node = currentBn.addNode("node"+i, ["state0","state1"], {cpt:[.5,.5], pos: {x: event.offsetX, y: event.offsetY}, addToCanvas: true});
-			$('#display_'+node.id+' h6').map(lightNodeEdit);
-		}
-		event.preventDefault();
-		return false;*/
-		var target = event.target;
-		var offsetX = event.offsetX;
-		var offsetY = event.offsetY;
-		var menu = Menu({
-			type: 'contextMenu',
-			label: 'Make',
-			items: [
-				MenuAction('Node', () => {
-					if ($(target).is(".bnview") || $(target).is(".netSvgCanvas")) {
-						let i = 0;
-						while (currentBn.nodesById["node"+i]) i++;
-						let node = currentBn.guiAddNode('node'+i, null, {cpt:[.5,.5], pos: {x: offsetX, y: offsetY}, submodelPath: currentBn.currentSubmodel});
-						currentBn.guiUpdateAndDisplayForLast(null, _=> $('#display_'+node.id+' h6').map(function() { currentBn.findItem(this).lightNodeEdit()}));
-					}
-					menu.dismiss();
-					return false;
-				}),
-				MenuAction('Submodel', () => {
-					currentBn.guiAddSubmodel(null, {pos: {x: offsetX, y: offsetY}, addToCanvas: true});
-					menu.dismiss();
-					return false;
-				}),
-				MenuAction('Text Box', () => {
-					var textBox = currentBn.guiAddTextBox('[Insert text]', {pos: {x: offsetX, y: offsetY}});
-					textBox.guiEdit({combine: true});
-					//$('#display_'+textBox.id).trigger('dblclick');
-					menu.dismiss();
-					return false;
-				}),
-			],
-		});
-		menu.popup({left: event.clientX, top: event.clientY - 15});
-		event.preventDefault();
-		return false;
-	});
-
-	q('.bnouterview').listeners.add("contextmenu", event => {
-		let displayItem = event.target.closest(".node, .submodel, .textBox");
-		if (displayItem) {
-			if (event.shiftKey)  return true;
-			if (event.ctrlKey || event.target.closest('.submodel')) {
-				var $displayItem = $(displayItem);
-				var item = currentBn.getItemById($displayItem.attr("id").replace(/^display_/, ''));
-				item.contextMenu(event);
-				event.preventDefault();
-				return false;
-			}
-		}
-	});
-	
-	/// App focus. Not sure how expensive this is.
-	document.addEventListener('click', event => {
-		app.windowFocus = event.target.closest('.dialog, .bnview');
-	});
-
-	/** Convert all contenteditable pastes to plain text first, unless turned off with
-	 * event.mbNoGlobalPasteHandling.
-	 */
-	document.addEventListener('paste', event => {
-		if (!event.mbNoGlobalPasteHandling && event.target.closest('[contenteditable]')) {
-			event.preventDefault();
-			let text = event.clipboardData.getData('text/plain');
-
-			document.execCommand('insertText', false, text);
-		}
-	});
-	
-	/// BN Name
-	$('.menu.bar .bnName').on('input change', function(evt) {
-		let newName = $(this).val();
-		currentBn.fileName = currentBn.fileName.replace(/^.*(\..*?)$/, newName+'$1');
-		app.updateBnName();
-	});
-
-	$("[name=viewZoom]").on("input", function(evt) {
-		$('.itemList').addClass('unfocusMenu');
-		$(this).closest('.menuAction').addClass('focusMenu');
-		var $range = $(evt.target);
-		let jtc = q('.jtreeView .canvas');
-		if (jtc) {
-			$(jtc).css({transformOrigin: 'top left', transform: 'scale('+$range.val()+')'});
-		}
-		else {
-			q('.bnview').style.zoom = $range.val();
-			/// Fx doesn't currently handle zoom for svg properly (2024-11-19)
-			fixZoomSvg();
-		}
-		$(".viewZoomText").text(Math.round($range.val()*100)+"%");
-	}).on('change mouseup', function(evt) {
-		$('.itemList').removeClass('unfocusMenu');
-		$(this).closest('.menuAction').removeClass('focusMenu');
-	}).on("dblclick", function(evt) {
-		var $range = $(evt.target);
-		$range.val(1);
-		$range.trigger("input");
-		$range.trigger("mouseup");
-	});
-
-	let doingSpacing = false;
-	let savedPos = null;
-	let currentSubItems = null;
-	let spacingMins = {x: null, y: null};
-	$("[name=viewSpacing]").on("input", function(evt) {
-		$('.itemList').addClass('unfocusMenu');
-		$(this).closest('.menuAction').addClass('focusMenu');
-		let type = this.dataset.type;
-		let mins = spacingMins;
-		if (!doingSpacing) {
-			currentSubItems = currentBn.getCurrentSubmodel().getItems();
-			savedPos = currentSubItems.map(n => ({...n.pos}));
-			mins.x = 10000000, mins.y = 100000000;
-			savedPos.forEach(pos => {
-				mins.x = Math.min(pos.x, mins.x);
-				mins.y = Math.min(pos.y, mins.y);
-			});
-		}
-		doingSpacing = true;
-		let $range = $(evt.target);
-		let scale = Number($range.val());
-		let xScale = scale;
-		let yScale = scale;
-		if (type == 'horizontal')  yScale = 1;
-		if (type == 'vertical')  xScale = 1;
-		$(this).closest('.menuAction').find('.viewSpacingText').text(Math.round(scale*100)+"%");
-		currentSubItems.forEach((n,i) => { n.moveTo((savedPos[i].x-mins.x)*xScale+mins.x, (savedPos[i].y-mins.y)*yScale+mins.y, false); });
-	}).on('change', function(evt) {
-		$('.itemList').removeClass('unfocusMenu');
-		$(this).closest('.menuAction').removeClass('focusMenu');
-		currentBn.changes.doCombined(_=> {
-			currentSubItems.forEach((n,i) => {
-				let newPos = {...n.pos};
-				n.apiMoveTo(savedPos[i].x, savedPos[i].y);
-				n.moveTo(newPos.x, newPos.y);
-			});
-		});
-		$(evt.target).val(1);
-		$('.viewSpacingText').text('100%');
-		currentSubItems = null;
-		doingSpacing = false;
-		savedPos = null;
-	}).on('mouseup', function(evt) {
-		$('.itemList').removeClass('unfocusMenu');
-		$(this).closest('.menuAction').removeClass('focusMenu');
-	});/*.on("dblclick", function(evt) {
-		let $range = $(evt.target);
-		$range.val(1);
-		$range.trigger("change");
-	});*/
-
-	/// Handle an example BN load
-	$(".exampleBns").on("change", function() {
-		window.location.href = "?file=bns/"+$(this).find("option:selected").text();
-	});
-
-	/// Handle changes to iterations
-	$("[name=iterations]").on("keyup", function(evt) {
-		var numIterations = $(evt.target).val();
-		currentBn.iterations = numIterations;
-	});
-	$("[name=timeLimit]").on("keyup", function(evt) {
-		var timeLimit = parseInt($(evt.target).val());
-		currentBn.timeLimit = timeLimit;
-		if (timeLimit) {
-			$("[name=iterations]")[0].disabled = true;
-		}
-		else {
-			$("[name=iterations]")[0].disabled = false;
-		}
-	});
-	$("[name=perfLoops]").on("keyup", function(evt) {
-		var numLoops = $(evt.target).val();
-		currentBn.perfLoops = numLoops;
-	});
-	$("[name=perfIterations]").on("keyup", function(evt) {
-		var numIterations = $(evt.target).val();
-		currentBn.perfIterations = numIterations;
-	});
-	$("[name=numWorkers]").on("keyup", function(evt) {
-		var numWorkers = $(evt.target).val();
-		currentBn.numWorkers = parseInt(numWorkers);
-		currentBn.needsCompile = true;
-	});
-
-	/// Allow dropping of BN files to open them
-	$("body").on("drop", function(event) {
-		event.preventDefault();
-		var dt = event.originalEvent.dataTransfer;
-		if (dt.files) {
-			app.fileLoaded(dt.files[0], app.updateBN);
-		}
-	}).on("dragover", function(event) {
-		event.preventDefault();
-		// Set the dropEffect to move
-		event.originalEvent.dataTransfer.dropEffect = "open";
-	});
-	
-	$(document).on('keydown', (event) => {
-		if (event.ctrlKey && event.key == 'F12') {
-			$('.console').toggle();
-			$('.consoleInput').focus();
-		}
-	});
-	
-	consoleHistory = [];
-	consoleHistory.pos = 0;
-	$('.consoleInput').on('keydown', (event) => {
-		console.log(event.key);
-		if (event.key == 'Enter') {
-			var txt = $('.consoleInput').val();
-			console.log(txt);
-			
-			if (txt != consoleHistory[consoleHistory.length-1]) {
-				consoleHistory.push(txt);
-				consoleHistory.pos++;
-			}
-			$('.consoleInput').val('');
-			$('.consoleInput').blur();
-			
-			let lns = txt.split(/;/);
-			
-			for (let ln of lns) {
-				var m = ln.match(/^(.*)(<-|->)(.*)$/);
-				console.log(m);
-				if (m) {
-					var parents = m[1].trim().split(/\s*,\s*/);
-					var children = m[3].trim().split(/\s*,\s*/);
-					console.log(parents, children);
-					for (var parent of parents) {
-						for (var child of children) {
-							if (!currentBn.nodesById[parent])  currentBn.addNode(parent);
-							if (!currentBn.nodesById[child])  currentBn.addNode(child);
-							var parentNode = currentBn.nodesById[parent];
-							var childNode = currentBn.nodesById[child];
-							parentNode.addChildren([childNode]);
-						}
-					}
-					currentBn.display();
-					app.autoLayout(() => {
-						$('.consoleInput').focus();
-					});
-				}
-			}
-		}
-		else if (event.key == 'ArrowUp') {
-			if (consoleHistory.pos > 0) {
-				consoleHistory.pos--;
-				$('.consoleInput').val(consoleHistory[consoleHistory.pos]);
-			}
-		}
-		else if (event.key == 'ArrowDown') {
-			if (consoleHistory.pos < consoleHistory.length) {
-				consoleHistory.pos++;
-				if (consoleHistory.pos < consoleHistory.length) {
-					$('.consoleInput').val(consoleHistory[consoleHistory.pos]);
-				}
-				else {
-					$('.consoleInput').val('');
-				}
-			}
-		}
-	});
-	
-	
-	/* Fix contenteditable empty on td/th on firefox.
-	Block empty contenteditable fixing with, e.g., <div default-empty> */
-	q(document).listeners.add('focusin', event => {
-		let ce = event.target.matches?.('[contenteditable]:is(td,th):not([default-empty])') && event.target;
-		if (ce) {
-			if (!ce.textContent.trim())  ce.innerHTML='<br>';
-		}
-	}).add('focusout', event => {
-		let ce = event.target.matches?.('[contenteditable]:is(td,th):not([default-empty])') && event.target;
-		if (ce) {
-			if (!ce.textContent.trim())  ce.innerHTML='';
-		}
-	});
-	
-	Node.handleEvents($('.bnComponent')[0]);
-	TextBox.handleEvents($('.bnComponent')[0]);
-	ArcSelector.handleEvents($('.bnComponent')[0]);
-	
-	$(window).on('beforeunload', function() {
-		if (currentBn && currentBn.unsavedChanges) {
-			idbKeyVal.set(window.qs.bnId, currentBn.toJSON(), 'bns');
-			/// Still need to prompt, because we don't know why we're unloading
-			return false;
-		}
-	});
-
-	window.matchMedia("print").addEventListener('change',function(e) {currentBn.updateArcs()});
-	$(window).on('beforeprint', function() {
-		$('#printSheet').attr('media', 'screen');
-		currentBn.updateArcs();
-		$('#printSheet').attr('media', 'print');
-	}).on('afterprint', function() {
-		currentBn.updateArcs();
-	});
-	
-	(async _=>{
-		let bnSnapshot = null;
-		if (window.qs.bnId) {
-			bnSnapshot = await idbKeyVal.get(window.qs.bnId, 'bns');
-		}
-		else {
-			/// Chances of a clash are pretty tiny. Even if the user had 10,000 BNs stored, it'd be roughly 1 in 5,000 chance.
-			let bnId = genPass(8);
-			while (await idbKeyVal.get(bnId))  bnId = genPass(8);
-			window.history.pushState({}, '', changeQsUrl(window.location.href, {bnId}));
-		}
-
-		// let currentSnapshot = sessionStorage.getItem('currentSnapshot');
-		/// XXX: Need better method for handling files from QS clashing with snapshot (e.g. ask user if they want to restore saved version). For now, just disabling.
-		if (bnSnapshot && (window.parent === window || window.qs.withStorage) && !window.qs.noStorage) {
-			app.openBn(BN.from(bnSnapshot), {restored:true});
-			currentBn.display();
-			app.updateBN();
-		}
-		else if (window.qs.file) {
-			await app.loadFromServer(window.qs.file);
-			app.updateBN(_=>{
-				if (window.parent !== window)  window.parent.postMessage({type:'fileLoaded'});
-			});
-		}
-		else {
-			let bn = new BN({filename: `bn${++app.bnCount}.xdsl`});
-			app.openBn(bn);
-			currentBn.display();
-		}
-		
-		window.dispatchEvent(new Event('MakeBelieveLoaded'));
-	})();
+	app.init();
 });
 
 /// These classes have been updated, so re-add them to BN.ItemTypes

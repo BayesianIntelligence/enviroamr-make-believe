@@ -55,7 +55,7 @@
 	<script src="_/js/utils.js"></script>
 	<script src="_/js/htm.js"></script>
 	<script src="_/js/objectlinks.js"></script>
-	<script src="_/js/parsing.js"></script>
+	<script src="_/js/parsing.js" type="module"></script>
 	<link href="_/js/menu/menu_styles.css" type="text/css" rel="stylesheet" />
 	<script src="_/js/menu/menu_styles.js"></script>
 	<script src="_/js/makeBelieveTests.js"></script>
@@ -108,7 +108,7 @@
 	.node .controlBar { position: relative; border-bottom: solid 1px var(--node-border-color); grid-column: 1 / 4 }
 	.node h6 { font-size: 1em; margin: 0; font-weight: bold; padding: 1px;
 		text-overflow: ellipsis; white-space: nowrap; overflow: hidden; flex: 1;
-		cursor: pointer; max-width: 15em; }
+		cursor: pointer; max-width: 15em; text-wrap: balance; }
 	.node h6[contenteditable] { cursor: text; }
 	.node .hotSpotParent { width: 28px; display: flex;
 		align-items: center; justify-content: center; position: absolute;
@@ -156,6 +156,14 @@
 	.node.ds_label h6 { overflow: visible; white-space: normal; }
 	/*.node.ds_label .hotSpotParent { display: none; }*/
 	.node.ds_label h6 { text-align: center; }
+
+	/** Labelled oval view **/
+	.node.ds_labelOval {
+		border-radius: 50%; padding: 1.2em;
+		.state { display: none; }
+		.controlBar { border-bottom: none; }
+		h6 { overflow: visible; white-space: normal; max-width: var(--balanced-width); text-align: center; padding: 0; }
+	}
 	
 	/** States only view **/
 	.node.ds_labelStates .state .stateName { grid-column: 1 / span 3; }
