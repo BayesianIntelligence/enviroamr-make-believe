@@ -1684,6 +1684,24 @@ Node = class {
 	absorb() {
 		return this.delete({ absorb: true });
 	}
+	updateBeliefDistribution(beliefs) {
+		// XXX: Handling equations manually, but needs to be 'continuous' or similar
+		if (this.def.type == 'Equation') {
+			if (!this.stateSpace.discretized) {
+				if (Array.isArray(beliefs)) {
+					this.beliefs = beliefs.slice();
+				}
+				// Assume it's state map? If so, need to update states too
+				else {
+					let labels = Object.keys(beliefs);
+					this.removeStates('*');
+					this.addStates(labels);
+					this.beliefs = Object.values(beliefs);
+					this._updateDisplay = true;
+				}
+			}
+		}
+	}
 	updateDiscretization() {
 		/// We may have a manually specified discretisation. If so, don't over-write it
 		/// XXX forChildrenOnly doesn't work properly yet
@@ -3734,6 +3752,9 @@ ${nodesStr}
 			this.jtree = jtree;
 		}
 	}
+	async compile_server() {
+
+	}
 	updateRootNodes() {
 		var bn = this;
 		/// Cache root nodes
@@ -4955,7 +4976,10 @@ ${nodesStr}
 		//this.expectedValue = null;
 		let methodToCall = 'updateBeliefs_' + updateMethod + (this.useWorkers ? 'Worker' : '');
 		console.log(methodToCall);
-		this[methodToCall](callback, iterations);
+		this[methodToCall](async (...args)=>{
+			await callback(...args);
+			if (this.listeners)  this.listeners.notify('updateBeliefs');
+		}, iterations);
 		//this.updateBeliefs_local(callback, iterations);
 		//this.updateExpectedValue();
 	}
@@ -5180,6 +5204,29 @@ ${nodesStr}
 		this.updateExpectedValue();
 
 		if (callback) callback(bn, iterations);
+	}
+	async updateBeliefs_serverWorker(callback, iterations) {
+		const serverConfig = {
+			loadBn: '/loadBn?', // file= (server file) or string=  && type= -> returns bnId
+			updateBeliefs: '/updateBeliefs?', // evidence= && bnId= -> returns beliefs & related info like thresholds
+			closeBn: '/closeBn?', // bnId=
+		};
+		class BnServer {
+			constructor(config) {
+				this.config = config;
+			}
+			async loadBn(opts) { return await fetch(this.config.loadBn + new URLSearchParams(opts)).then(r => r.json()); }
+			async updateBeliefs(opts) { return await fetch(this.config.updateBeliefs + new URLSearchParams(opts)).then(r => r.json()); }
+			async closeBn(opts) { return await fetch(this.config.closeBn + new URLSearchParams(opts)).then(r => r.json()); }
+		}
+		const server = new BnServer(serverConfig);
+		const bnId = await server.loadBn({string: this.save_xdsl(), type: 'xdsl'});
+		const beliefs = await server.updateBeliefs({bnId, evidence: JSON.stringify(this.evidence)});
+		for (const [nodeId, bels] of Object.entries(beliefs)) {
+			this.nodesById[nodeId].updateBeliefDistribution(bels);
+		}
+		if (callback) callback(this, 1);
+		await server.closeBn({bnId});
 	}
 	/// This will generate a single case into the 'cas' parameter
 	/// XXX: This needs updating with a pointer to the independent version

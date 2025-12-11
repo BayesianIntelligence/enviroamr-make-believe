@@ -1214,8 +1214,8 @@ class Listeners {
 	*/
 	getTypeGroup(typeGroup) {
 		let type = typeGroup;
-		let group = null;
-		let listenerGroup = null;
+		let group = undefined;
+		let listenerGroup = undefined;
 		if (Array.isArray(typeGroup)) {
 			[type,group,listenerGroup] = typeGroup;
 		}

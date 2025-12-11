@@ -1773,6 +1773,8 @@ BN = class extends BN {
 		if (this._trackingArcInfluences) {
 			this.displayArcsWithInfluences();
 		}
+
+		this.listeners.notify('displayBeliefs');
 	}
 
 	headerFormat(id, label) {
@@ -2973,6 +2975,8 @@ Submodel = class extends Submodel {
 			if (submodel.format.fontSize)  $displayItem.find('.inner').css('font-size', submodel.format.fontSize+'pt');
 		}
 
+		this.net.listeners.notify('submodelLayout', this);
+
 		return $displayItem;
 	}
 
@@ -3320,7 +3324,7 @@ Node = class extends Node {
 		if (node.net.evidence[node.id]!==undefined)  $displayNode.addClass('hasEvidence');
 		$displayNode.addClass(node.type);
 		/// Clear out any existing states first
-		$displayNode.find(".state").remove();
+		$displayNode.find(".states").remove();
 		let $states = $displayNode.find('.inner').append('<div class="states">').find('.states');
 		for (var j=0; j<node.states.length; j++) {
 			var state = node.states[j];
@@ -3356,6 +3360,9 @@ Node = class extends Node {
 		}
 		var stateI = 0;
 		var allBeliefs = this.net.getDbnBeliefs(node.id);
+		if (!node.dynamic) {
+			$displayNode[0].style.setProperty('--max-bar', (1/Math.max(...node.beliefs)*0.95));
+		}
 		$displayNode.find(".state").each(function() {
 			if (node.dynamic) {
 				$(this).find(".beliefBarView").html(
@@ -3366,7 +3373,7 @@ Node = class extends Node {
 				var pc = mbConfig.sigFig(node.beliefs[stateI]);
 				var pcCss = node.beliefs[stateI];
 				$(this).find(".prob").text(String(pc).replace(/^0\./, '.'));
-				$(this).find(".beliefBar").css({width:(pcCss*100)+'%'});
+				$(this).find(".beliefBar").css({width:`calc(${pcCss*100}% * var(--max-bar))`});
 				$(this).find('.beliefBar')[0].dataset.stateName = node.states[stateI].id+'\n'+String(pc).replace(/^0\./, '.');
 			}
 			stateI++;
@@ -5766,7 +5773,7 @@ CPT.Editor = class extends Definition.Editor {
 	}
 	
 	/// Function for setup of table events
-	addEvents(rootEl) {
+	handleEvents(rootEl) {
 		rootEl = rootEl.querySelector('.CPT');
 		
 		rootEl.addEventListener("input", event => {
@@ -6384,7 +6391,7 @@ CPT.Editor = class extends Definition.Editor {
 		}
 		panel.append(table);
 		
-		this.addEvents(panel);
+		this.handleEvents(panel);
 		
 		this.rootEl.innerHTML = '';
 		this.rootEl.append(panel);
@@ -6561,7 +6568,7 @@ CDT.Editor = class extends CPT.Editor {
 		this.setCellBackground(td);
 	}
 	
-	addEvents(rootEl) {
+	handleEvents(rootEl) {
 		rootEl = rootEl.querySelector('.CDT');
 		
 		rootEl.addEventListener("input", event => {
@@ -6650,6 +6657,7 @@ CDT.Editor = class extends CPT.Editor {
 Equation.Editor = class extends Definition.Editor {
 	constructor(...args) {
 		super(...args);
+		this.hasChanges = false;
 	}
 	
 	setType() { this.type = 'Equation'; }
@@ -6669,9 +6677,22 @@ Equation.Editor = class extends Definition.Editor {
 		this.editor = new CodeFlask(edit, {language: 'js'});
 		let code = currentCode.replace(new RegExp('^(\\s*)'+IDREGEX.source+'\\b'), '$1'+this.node.id);
 		this.editor.updateCode(code);
+		this.handleEvents();
 	}
+
+	handleEvents() {
+		this.rootEl.addEventListener('input', event => {
+			let ed = event.target.closest('.equationText');
+			if (ed) {
+				this.hasChanges = true;
+			}
+		});
+	}
+
+	handleObjectUpdate(m, updateId = null) { this.refreshView(m, updateId); }
 	
-	handleObjectUpdate(m, updateId = null) {
+	refreshView(m, updateId = null) {
+		this.hasChanges = false;
 		if (this.rootEl.matches('.definitionMade')) {
 			if (m.def || m.id) {
 				this.make();
@@ -6948,7 +6969,20 @@ var app = {
 		this.loadInitialBn();
 	},
 	loadInitialBn() {
+		if (window.qs.config) {
+			/// XXX: Need more general way to set config options from URL
+			let configOpts = JSON.parse(window.qs.config);
+			// if (configOpts.updateMethod)  this.setUpdateMethod(configOpts.updateMethod, true);
+			Object.assign(mbConfig, configOpts);
+		}
 		(async _=>{
+			let dispatchUp = evt => {
+				window.dispatchEvent(evt);
+				if (top !== window)  top.dispatchEvent(evt);
+			};
+			let evtReady = new CustomEvent('MakeBelieveReady', {detail: {window}});
+			let evtBeforeDisplay = new CustomEvent('MakeBelieveBeforeDisplay', {detail: {window}});
+			dispatchUp(evtReady);
 			let bnSnapshot = null;
 			if (window.qs.bnId) {
 				bnSnapshot = await idbKeyVal.get(window.qs.bnId, 'bns');
@@ -6964,11 +6998,14 @@ var app = {
 			/// XXX: Need better method for handling files from QS clashing with snapshot (e.g. ask user if they want to restore saved version). For now, just disabling.
 			if (bnSnapshot && (window.parent === window || window.qs.withStorage) && !window.qs.noStorage) {
 				app.openBn(BN.from(bnSnapshot), {restored:true});
+				dispatchUp(evtBeforeDisplay);
 				currentBn.display();
 				app.updateBN();
 			}
 			else if (window.qs.file) {
 				await app.loadFromServer(window.qs.file);
+				dispatchUp(evtBeforeDisplay);
+				currentBn.display();
 				app.updateBN(_=>{
 					if (window.parent !== window)  window.parent.postMessage({type:'fileLoaded'});
 				});
@@ -6976,10 +7013,13 @@ var app = {
 			else {
 				let bn = new BN({filename: `bn${++app.bnCount}.xdsl`});
 				app.openBn(bn);
+				dispatchUp(evtBeforeDisplay);
 				currentBn.display();
 			}
 			
-			window.dispatchEvent(new Event('MakeBelieveLoaded'));
+			let evt = new CustomEvent('MakeBelieveLoaded', {detail: {window}});
+			window.dispatchEvent(evt);
+			if (top !== window)  top.dispatchEvent(evt);
 		})();
 	},
 	setupMenus() {
@@ -7128,6 +7168,7 @@ var app = {
 					MenuAction("Likelihood Weighting (Worker)", event => app.setUpdateMethod('likelihoodWeighting',true, event.target), {type: updateMethodIs.likelihoodWeightingWorker ? 'checked' : ''}),
 					MenuAction("Junction Tree", event => app.setUpdateMethod('junctionTree', false, event.target), {type: updateMethodIs.junctionTree ? 'checked' : ''}),
 					MenuAction("Junction Tree (Worker)", event => app.setUpdateMethod('junctionTree', true, event.target), {type: updateMethodIs.junctionTreeWorker ? 'checked' : ''}),
+					MenuAction("Server", event => app.setUpdateMethod('server', true, event.target), {type: updateMethodIs.server ? 'checked' : ''}),
 					MenuAction("Auto Select (Worker)", event => app.setUpdateMethod('autoSelect', false, event.target), {type: updateMethodIs.autoSelect ? 'checked' : ''}),
 				]}),
 				MenuAction("Find Good Decisions", function() { app.findGoodDecisions(); dismissActiveMenus(); }),
@@ -7315,8 +7356,11 @@ var app = {
 			/// Handle binary differently to text
 			let fileExtInfo = BN.FILE_EXTENSIONS[format];
 			let source = await fetch(fileName).then(r => fileExtInfo.text ? r.text() : r.arrayBuffer());
-			let bn = new BN({source, outputEl: $(".bnview"), format: format, fileName: baseName(fileName), onload: callback});
+			let bn = new BN({source, format: format, fileName: baseName(fileName)});
+			// XXX: Putting here so it doesn't trigger display. But need to fix
+			bn.outputEl = $('.bnview');
 			app.openBn(bn);
+			callback();
 		});
 	},
 	openBn(bn, o = {}) {
@@ -8204,6 +8248,13 @@ var app = {
 				app.updateBN(_=>app.autoLayout());*/
 			});
 		}).click();
+	},
+	addHelper(id, helper) {
+		/// XXX: There's a mismatch here between the app/app helpers and the currentBn. Need to fix
+		this.helpers[id] = helper;
+		helper.currentBn = currentBn;
+		helper.n = n;
+		helper.$ = $;
 	},
 	helpers: {
 		stats: {
