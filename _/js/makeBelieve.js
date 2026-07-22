@@ -5215,15 +5215,20 @@ ${nodesStr}
 			constructor(config) {
 				this.config = config;
 			}
-			async loadBn(opts) { return await fetch(this.config.loadBn + new URLSearchParams(opts)).then(r => r.json()); }
+			async loadBn(opts) { return await fetch(this.config.loadBn,
+				{method:'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams(opts)}
+			).then(r => r.json()); }
 			async updateBeliefs(opts) { return await fetch(this.config.updateBeliefs + new URLSearchParams(opts)).then(r => r.json()); }
 			async closeBn(opts) { return await fetch(this.config.closeBn + new URLSearchParams(opts)).then(r => r.json()); }
 		}
 		const server = new BnServer(serverConfig);
 		const bnId = await server.loadBn({string: this.save_xdsl(), type: 'xdsl'});
 		const beliefs = await server.updateBeliefs({bnId, evidence: JSON.stringify(this.evidence)});
-		for (const [nodeId, bels] of Object.entries(beliefs)) {
+		for (const [nodeId, {beliefs: bels, mean, sd}] of Object.entries(beliefs)) {
 			this.nodesById[nodeId].updateBeliefDistribution(bels);
+			// Temporarily make these available too
+			this.nodesById[nodeId]._mean = mean;
+			this.nodesById[nodeId]._sd = sd;
 		}
 		if (callback) callback(this, 1);
 		await server.closeBn({bnId});

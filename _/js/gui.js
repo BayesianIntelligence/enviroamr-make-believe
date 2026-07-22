@@ -959,28 +959,31 @@ DisplayItem = class extends DisplayItem {
 			nodes = o.asPath ? nodes : new Set(nodes);
 			nodeLists = [nodes];
 		}
+
+		let lowLight = {'opacity': o.lowOpacity}; //{filter: 'contrast(10%) brightness(1.85)'};
+		let normalLight = {'opacity': o.highOpacity}; //{filter: ''};
 		
 		/// Low-light all nodes and arcs
 		let clickability = o.lowClickable ? {pointerEvents: ''} : {pointerEvents: 'none'};
 		let clickable = {pointerEvents: ''};
-		this.nodes.forEach(n => n.el().css({'opacity': o.lowOpacity, ...clickability}));
-		$('.dependency').css({'opacity': o.lowOpacity, ...clickability});
+		this.nodes.forEach(n => n.el().css({...lowLight, ...clickability}));
+		$('.dependency').css({...lowLight, ...clickability});
 		
 		for (let nodes of nodeLists) {
 			/// High-light all chosen nodes, and arcs within nodes
 			let prevNode = null;
 			for (let node of nodes) {
-				node.el().css({opacity: o.highOpacity, ...clickable});
+				node.el().css({...normalLight, ...clickable});
 				/// Highlight just as a path
 				if (o.asPath) {
 					if (prevNode && prevNode != node) {
 						let pathInOut = node.pathsIn.find(p => p.parentItem == prevNode) ?? node.pathsOut.find(p => p.childItem == prevNode);
-						$(pathInOut.arcSelector.path).css({opacity: o.highOpacity, ...clickable});
+						$(pathInOut.arcSelector.path).css({...normalLight, ...clickable});
 					}
 				}
 				/// Highlight any connections between the nodes
 				else {
-					node.getParentArcs().forEach(arc => nodes.has(arc.parent) ? $(arc.path).css({opacity: o.highOpacity, ...clickable}) : null);
+					node.getParentArcs().forEach(arc => nodes.has(arc.parent) ? $(arc.path).css({...normalLight, ...clickable}) : null);
 				}
 				//node.parents.forEach(p => p.el().css('opacity', o.highOpacity));
 				prevNode = node;
@@ -989,8 +992,9 @@ DisplayItem = class extends DisplayItem {
 	}
 	
 	resetOpacities() {
-		this.nodes.forEach(n => n.el().css({opacity: '', pointerEvents:''}));
-		$('.dependency').css({opacity: '', pointerEvents:''});
+		let normalLight = {opacity: '1'}; //{filter: ''};
+		this.nodes.forEach(n => n.el().css({...normalLight, pointerEvents:''}));
+		$('.dependency').css({...normalLight, pointerEvents:''});
 	}
 
 	isHidden() {
@@ -1538,9 +1542,11 @@ BN = class extends BN {
 		for (let item of this.getVisibleItems()) {
 			item.removeArcs();
 		}
-		currentBn.currentSubmodel = submodelPath;
-		currentBn.display();
-		currentBn.displayBeliefs();
+		/// This was 'currentBn', but changed to 'this'
+		this.currentSubmodel = submodelPath;
+		this.display();
+		this.displayBeliefs();
+		this.listeners.notify('openSubmodel', this.getCurrentSubmodel());
 	}
 
 	guiAddNodeRaw(node) {
