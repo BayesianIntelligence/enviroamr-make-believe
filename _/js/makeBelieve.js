@@ -1694,8 +1694,11 @@ Node = class {
 				// Assume it's state map? If so, need to update states too
 				else {
 					let labels = Object.keys(beliefs);
-					this.removeStates('*');
-					this.addStates(labels);
+					// We do a lot of stuff in removeStates/addStates normally for discrete nodes/children
+					// Here we shortcut all that since it's an equation anyway
+					// this.removeStates('*');
+					// this.addStates(labels);
+					this.states = labels.map(lab => new State({id: lab}));
 					this.beliefs = Object.values(beliefs);
 					this._updateDisplay = true;
 				}
@@ -3055,6 +3058,9 @@ BN = class extends Submodel {
 		});
 		/// Update node count, comments, etc. (if present)
 		bn.updateViewer = true;
+
+		/// Set iterations
+		bn.iterations = this.objs.filter('smile').attr('numsamples') || 10000;
 
 		this.compile(true);
 	}

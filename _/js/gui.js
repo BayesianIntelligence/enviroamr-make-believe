@@ -1538,6 +1538,7 @@ BN = class extends BN {
 	}
 
 	guiOpenSubmodel(submodelPath) {
+		this.clearSelection();
 		submodelPath = BN.makeSubmodelPath(submodelPath);
 		for (let item of this.getVisibleItems()) {
 			item.removeArcs();
