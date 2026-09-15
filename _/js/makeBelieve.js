@@ -2467,7 +2467,7 @@ BN = class extends Submodel {
 	static convert = {
 		toJSON: {
 			_omit: ['outputEl','objs','onload','saveListeners','saveListeners','listeners','changes','el','expectedValue',
-				'nodesById','needsCompile','source','_workers','net','node','submodel'],
+				'nodesById','needsCompile','source','_workers','net','node','submodel','_genieFunctions'],
 			// nodes(val) { return val. },
 			subNodes(val) { return val.map(n => n.id); },
 			subItems(val) { return val.map(i => i.id); },
@@ -3061,6 +3061,9 @@ BN = class extends Submodel {
 
 		/// Set iterations
 		bn.iterations = this.objs.filter('smile').attr('numsamples') || 10000;
+
+		/// This is currently just for pass-through
+		bn._genieFunctions = this.objs.find('functions');
 
 		this.compile(true);
 	}
@@ -3845,6 +3848,9 @@ ${nodesStr}
 			/// XXX Clarify the difference btw numsamples/discsamples
 			.attr("numsamples", this.iterations)
 			.attr("discsamples", this.iterations);
+		// Pass through any custom functions
+		if (bn._genieFunctions)  $smile.append(bn._genieFunctions);
+
 		$smile.append("<nodes>");
 		for (var i = 0; i < sortedNodes.length; i++) {
 			var node = sortedNodes[i];
