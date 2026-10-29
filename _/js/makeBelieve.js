@@ -5236,11 +5236,12 @@ ${nodesStr}
 		const server = new BnServer(serverConfig);
 		const bnId = await server.loadBn({string: this.save_xdsl(), type: 'xdsl'});
 		const beliefs = await server.updateBeliefs({bnId, evidence: JSON.stringify(this.evidence)});
-		for (const [nodeId, {beliefs: bels, mean, sd}] of Object.entries(beliefs)) {
+		for (const [nodeId, {beliefs: bels, mean, sd, quantiles}] of Object.entries(beliefs)) {
 			this.nodesById[nodeId].updateBeliefDistribution(bels);
 			// Temporarily make these available too
 			this.nodesById[nodeId]._mean = mean;
 			this.nodesById[nodeId]._sd = sd;
+			this.nodesById[nodeId]._quantiles = quantiles;
 		}
 		if (callback) callback(this, 1);
 		await server.closeBn({bnId});

@@ -676,7 +676,7 @@ class NodeContextMenu {
 				if (fontSize === null) {
 					/// This won't be right on many devices. Replace with the real default (from the CSS, but
 					/// not on the node, apparently)
-					fontSize = Math.round(parseFloat(nodeStyle.fontSize)/72*96);
+					// fontSize = Math.round(parseFloat(nodeStyle.fontSize)/72*96);
 				}
 				menuEl.querySelector('input[name=fontSize]').value = fontSize+'pt';
 			}

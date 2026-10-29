@@ -3312,7 +3312,7 @@ Node = class extends Node {
 			if (node.format.backgroundColor)  $displayNode.css('--node-background', node.format.backgroundColor);
 			if (node.format.fontColor)  $displayNode.css('--node-text', node.format.fontColor);
 			if (node.format.fontFamily)  $displayNode.css('--node-font-family', node.format.fontFamily);
-			if (node.format.fontSize)  $displayNode.css('--node-font-size', draw.ptToView(node.format.fontSize));
+			if (node.format.fontSize)  $displayNode.css('--node-font-size', node.format.fontSize+'pt');
 			$displayNode.find('h6').css('--balanced-width', getBalancedWidth($displayNode.find('h6')[0])+'px');
 			removeMatchingClasses($displayNode[0], c => c.startsWith('ds_'));
 			$displayNode.attr('data-display-style', null);
